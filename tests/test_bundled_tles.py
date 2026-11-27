@@ -55,4 +55,6 @@ def test_the_benchmark_bundles_an_orbit_for_every_satellite_it_simulates():
 
     for name in ("tab_target_analytic.yaml", "tab_target_riemann.yaml"):
         tab = yaml.safe_load((REFRAME_DATA / name).read_text())
-        assert REFRAME_DATA / tab["satellites"]["extra_orbit_dir"] == orbit_dir, name
+        traj_entry = tab["model"]["components"][0]
+        ((_, traj_params),) = traj_entry.items()
+        assert REFRAME_DATA / traj_params["extra_orbit_dir"] == orbit_dir, name

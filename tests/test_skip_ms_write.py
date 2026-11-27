@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 from tabascal import tab_tools
+from tabascal.schema import validate_config
 from tabascal.scripts import _run_tabascal_impl as runner
 from tabascal.scripts.run_tabascal import build_parser
 
@@ -15,7 +16,10 @@ def test_export_policy(monkeypatch, capsys, skip, path):
     data = {"data_col": "DATA", "row_chunk": 100000}
     if skip is not None:
         data["skip_ms_write"] = skip
-    config = SimpleNamespace(args={"data": data}, gain_table=["external.B"])
+    config = SimpleNamespace(
+        config=validate_config({"model": {"components": []}, "data": data}),
+        gain_table=["external.B"],
+    )
     tab_tools.write_ms_if_enabled(config, "input.ms", path)
     assert path in capsys.readouterr().out
     if skip:
@@ -28,14 +32,14 @@ def test_export_policy(monkeypatch, capsys, skip, path):
 def test_cli_and_config_policy(monkeypatch, cli, configured, expected):
     argv = ["run", "-c", "config.yaml", "-n", "test"] + (["--skip-ms-write"] if cli else [])
     args = build_parser().parse_args(argv)
-    config = {"data": {"skip_ms_write": configured}}
+    config = validate_config({"model": {"components": []}, "data": {"skip_ms_write": configured}})
     monkeypatch.setattr(runner, "load_config", lambda _: config)
     monkeypatch.setattr(runner, "set_precision", lambda _: None)
     monkeypatch.setattr(runner, "is_process_0", lambda: False)
     subtract = Mock()
     monkeypatch.setattr(runner, "tabascal_subtraction", subtract)
     runner.run(args)
-    assert subtract.call_args.args[0]["data"]["skip_ms_write"] is expected
+    assert subtract.call_args.args[0].data.skip_ms_write is expected
 
 
 @pytest.mark.parametrize("skip", [False, True])
@@ -43,8 +47,11 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
     import jax.numpy as jnp
     data = jnp.ones((1, 1, 4), dtype=complex)
     config = SimpleNamespace(
-        args={"data": {"data_col": "DATA", "skip_ms_write": skip},
-              "opt": {"max_iter": 1, "epsilon": 0.1, "dual_run": False}},
+        config=validate_config({
+            "model": {"components": []},
+            "data": {"data_col": "DATA", "skip_ms_write": skip},
+            "opt": {"max_iter": 1, "epsilon": 0.1},
+        }),
         vis_obs=data, noise=1., flags=jnp.zeros(data.shape, dtype=bool), n_rfi=0,
     )
     pred = {"vis_obs": data[None]}

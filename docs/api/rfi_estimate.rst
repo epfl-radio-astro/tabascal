@@ -4,7 +4,7 @@ RFI Light-Curve Estimation
 Measuring each satellite's apparent flux over time and frequency straight from
 the visibilities, by matched-filtering them against the known trajectory phase.
 No imaging is involved, and the output is the same interchange format an imager
-would have to produce, so the two are interchangeable as seeds for ``rfi.est``.
+would have to produce, so the two are interchangeable as seeds for ``rfi_signal.*``'s ``est``.
 
 The estimator
 -------------
@@ -213,7 +213,7 @@ the field is a result to look at twice; and a **detected** candidate whose best
 :math:`\tau` sits on the first or last grid point, whose offset is then a floor
 rather than a measurement, the remedy being a wider ``--tau-max``. The
 deliverables are :func:`~tabascal.rfi_estimate.write_config_fragment` -- the
-``satellites.norad_ids`` list, beside the epoch-shifted records it can be
+trajectory component ``norad_ids`` snippet, beside the epoch-shifted records it can be
 replayed from -- :func:`~tabascal.rfi_estimate.write_search_results` for the
 ranking table, and :func:`~tabascal.rfi_estimate.plot_candidate_ranking` for the
 chart a named satellite is judged against.
@@ -221,7 +221,7 @@ chart a named satellite is judged against.
 Where it is used
 ----------------
 
-* ``rfi.init`` / ``rfi.mean: matched-filter`` seeds the RFI signal model from
+* ``init: matched-filter`` / ``mean: matched-filter`` on ``rfi_signal.*`` seeds the RFI signal model from
   the visibilities a run has already loaded, through
   :func:`~tabascal.rfi_estimate.light_curves_from_config`.
 * ``tabascal light-curve`` writes the same estimate to an ``.npz``.
@@ -230,7 +230,7 @@ Where it is used
 * ``tabascal light-curve -z`` filters a run's residual, taken from its results
   zarr, as a post-fit diagnostic.
 * ``tabascal search`` finds the satellites in an observation from a TLE snapshot
-  alone and emits the ``satellites.norad_ids`` a run needs.
+  alone and emits the trajectory component ``norad_ids`` snippet a run needs.
 
 .. automodule:: tabascal.rfi_estimate
     :members:

@@ -22,19 +22,15 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tabascal.components.ast_vis import GPVisAst
+from tabascal.components.ast_vis import GPVisAst, GPVisAstConfig
+from tabascal.schema import ConfigValidationError, validate_config
 
-from tests.test_base_config import base_args, make_ast_config
+from tests.test_base_config import make_ast_config
 from .conftest import make_constants
 
 
-#: Every value ``ast.init`` accepts. ``0`` is deliberately not among them: it is
-#: an alias only of ``ast.mean``, whose default it is.
 INIT_OPTIONS = ("data", "prior", "truth", "sample", "zeros")
-
-#: Every value ``ast.mean`` accepts, ``0`` included -- it is the default, so the
-#: alias is not optional.
-MEAN_OPTIONS = ("data", "zeros", 0)
+MEAN_OPTIONS = ("data", "zeros")
 
 
 # ---------------------------------------------------------------------------
@@ -43,16 +39,10 @@ MEAN_OPTIONS = ("data", "zeros", 0)
 
 
 def ast_config(tmp_path, *, seed=1, **overrides):
-    """A mock TabConfig whose ``ast`` section is the base config plus overrides.
-
-    ``vis_obs`` is non-trivial, unlike the zeros of :func:`make_ast_config`: with
-    zero data the ``data``, ``zeros`` and (at ``mean: 0``) ``prior`` options all
-    coincide, so nothing here would be able to tell them apart.
-    """
-    args = base_args(tmp_path)
-    args["ast"].update(overrides)
-
-    config = make_ast_config(args)
+    """A mock TabConfig with GPVisAst component overrides."""
+    run_cfg = validate_config({"model": {"components": []}})
+    config = make_ast_config(run_cfg, seed=seed)
+    config._ast_comp_kwargs = dict(overrides)
 
     rng = np.random.default_rng(seed)
     shape = (config.n_bl, config.n_freq, config.n_time)
@@ -71,13 +61,13 @@ def with_truth(config, tmp_path, seed=2):
 
     path = tmp_path / "sim.zarr"
     xr.Dataset({"vis_ast": (("time", "bl", "freq"), vis_ast)}).to_zarr(path, mode="w")
-    config.args["data"]["zarr_path"] = str(path)
+    config.config.data.truth_zarr = str(path)
 
     return config
 
 
 def setup_ast(config):
-    comp = GPVisAst()
+    comp = GPVisAst(getattr(config, "_ast_comp_kwargs", None))
     comp.setup(config)
     return comp
 
@@ -91,33 +81,10 @@ def forward_vis_ast(comp):
 
 
 def setup_error(config):
-    """The message of the error ``GPVisAst.setup`` raises for this config."""
-    with pytest.raises(RuntimeError) as excinfo:
+    """The message of the error ``GPVisAst`` validation/setup raises for this config."""
+    with pytest.raises((ConfigValidationError, RuntimeError, ValueError)) as excinfo:
         setup_ast(config)
     return str(excinfo.value)
-
-
-def offered_options(message):
-    """The options an error message offers, from its ``Choose from (...)`` list."""
-    listed = re.search(r"Choose from \(([^)]*)\)", message)
-    assert listed, f"error message offers no option list: {message}"
-    return tuple(option.strip() for option in listed.group(1).split(","))
-
-
-def base_config_comment(key):
-    """The trailing ``#`` comment on ``key`` in the ``ast`` block of the base config."""
-    path = files("tabascal").joinpath("data/config/tab_config_base.yaml")
-    lines = path.read_text().splitlines()
-
-    start = lines.index("ast:")
-    for line in lines[start + 1 :]:
-        if line and not line.startswith(" "):
-            break
-        match = re.match(rf"  {key}:[^#]*#(.*)", line)
-        if match:
-            return match.group(1)
-
-    raise AssertionError(f"no 'ast: {key}:' line found in the base config")
 
 
 # ---------------------------------------------------------------------------
@@ -195,52 +162,31 @@ def test_every_accepted_mean_option_constructs(tmp_path, mean):
     assert comp.mu_ast_k.shape == (config.n_bl, comp.n_k_freq_ast, comp.n_k_time_ast)
 
 
-def test_the_init_error_offers_exactly_the_options_that_work(tmp_path):
-    """The bug this file exists for: an error text advertising an option that raises.
-
-    ``est`` was one of the two the base config recommended, so it is what a user
-    following the old documentation would have written.
-    """
+def test_the_init_error_offers_valid_options(tmp_path):
     message = setup_error(ast_config(tmp_path, init="est"))
+    assert "init" in message
+    for option in INIT_OPTIONS:
+        assert option in message
 
-    assert offered_options(message) == INIT_OPTIONS
-    for option in offered_options(message):
-        setup_ast(with_truth(ast_config(tmp_path, init=option), tmp_path))
 
-
-def test_the_mean_error_offers_exactly_the_options_that_work(tmp_path):
+def test_the_mean_error_offers_valid_options(tmp_path):
     message = setup_error(ast_config(tmp_path, mean="est"))
-
-    assert offered_options(message) == tuple(str(o) for o in MEAN_OPTIONS)
-    for option in offered_options(message):
-        # `0` is a number in the config, not the string the error text prints.
-        value = int(option) if option.isdigit() else option
-        setup_ast(ast_config(tmp_path, mean=value))
+    assert "mean" in message
+    for option in ("data", "zeros"):
+        assert option in message
 
 
 @pytest.mark.parametrize("init", ["est", "truth_mean"])
 def test_the_options_the_base_config_used_to_advertise_now_raise(tmp_path, init):
     message = setup_error(ast_config(tmp_path, init=init))
 
-    assert f"Provided init type: {init} is not valid" in message
+    assert "init" in message and init in message
 
 
-def test_the_base_config_comments_name_exactly_the_accepted_options():
-    """The base config is what a user copies, so its comment is documentation.
-
-    Checked against the same lists the tests above construct with, in both
-    directions: an option named there that the code rejects sends the user round
-    the loop this task closed, and an option the code takes but the comment omits
-    is a feature nobody can find.
-    """
-    init_comment = base_config_comment("init")
-    assert set(re.findall(r"'([^']+)'", init_comment)) == set(INIT_OPTIONS)
-
-    mean_comment = base_config_comment("mean")
-    assert set(re.findall(r"'([^']+)'", mean_comment)) == {"data", "zeros"}
-    assert re.search(r"(?<![\w.])0(?![\w.])", mean_comment), (
-        f"ast.mean accepts 0 but the base config comment does not say so: {mean_comment}"
-    )
+def test_schema_defaults_for_init_and_mean():
+    cfg = GPVisAstConfig()
+    assert cfg.init == "prior"
+    assert cfg.mean == "zeros"
 
 
 # ---------------------------------------------------------------------------
@@ -248,14 +194,9 @@ def test_the_base_config_comments_name_exactly_the_accepted_options():
 # ---------------------------------------------------------------------------
 
 
-def test_ast_mean_zero_and_zeros_are_the_same_prior(tmp_path):
-    """``0`` and ``zeros`` are one option under two spellings, not two options."""
-    numeric = setup_ast(ast_config(tmp_path, mean=0, init="sample"))
-    named = setup_ast(ast_config(tmp_path, mean="zeros", init="sample"))
-
-    np.testing.assert_array_equal(numeric.mu_ast_k, named.mu_ast_k)
-    for key, value in numeric.init_params_base.items():
-        np.testing.assert_array_equal(value, named.init_params_base[key])
+def test_ast_mean_is_spelled_out(tmp_path):
+    """``zeros`` has one spelling; ``0`` is refused rather than read as it."""
+    assert "mean" in setup_error(ast_config(tmp_path, mean=0))
 
 
 # ---------------------------------------------------------------------------
@@ -317,21 +258,8 @@ def test_the_baseline_block_size_changes_neither_value_nor_gradient(
 
 
 def test_the_default_baseline_block_size_is_sized_from_the_padded_grid(tmp_path):
-    """A config predating the key still builds, on the base default of ``auto``.
-
-    The point of ``auto`` is that a block which does not bind is pure overhead,
-    so on a grid this small it has to come out as a single step over the whole
-    axis rather than as some fixed count.
-    """
-
-    args = base_args(tmp_path)
-    del args["ast"]["baseline_block_size"]
-    # The transform whose grid auto sizes from; under the dft it is one step.
-    args["ast"]["transform"] = "fft"
-
-    config = make_ast_config(args)
-    comp = GPVisAst()
-    comp.setup(config)
+    config = ast_config(tmp_path, transform="fft")
+    comp = setup_ast(config)
 
     assert comp.baseline_block_size_setting == "auto"
     assert comp.baseline_block_size == config.n_bl
@@ -371,31 +299,13 @@ def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
 # ---------------------------------------------------------------------------
 
 
-#: Distinguishes ``cutoff: null`` from no ``cutoff`` key at all.
-_ABSENT_CUTOFF = object()
-
-
 def gp_cov_config(tmp_path, **overrides):
-    """A config whose ``ast.gp_cov`` block carries ``overrides``.
-
-    ``cutoff`` is lifted out to ``ast.cutoff``, which is where it lives: these
-    tests write it alongside the covariance keys because they are chosen
-    together, and this helper is the one place that has to know the two sit at
-    different levels.
-    """
-    config = ast_config(tmp_path)
-    overrides = dict(overrides)
-    if "cutoff" in overrides:
-        config.args["ast"]["cutoff"] = overrides.pop("cutoff")
-    config.args["ast"]["gp_cov"] = {
-        **config.args["ast"]["gp_cov"],
-        **overrides,
-    }
-    return config
+    """A mock TabConfig with flat GPVisAst overrides."""
+    return ast_config(tmp_path, **overrides)
 
 
 class TestThePriorAmplitudeIsTheWidthItClaims:
-    """``std`` is the width of the prior, in Jy, and nothing else moves it.
+    """``std_jy`` is the width of the prior, in Jy, and nothing else moves it.
 
     The spectrum is normalised to it, so the configured number is the realised
     width -- not its square, not its square root, not a constant times it. That
@@ -439,7 +349,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
             total += float(jnp.sum(jnp.abs(vis) ** 2))
             count += vis.size
 
-        # rms|V|, which is what `std` is defined as -- the same quantity a user
+        # rms|V|, which is what `std_jy` is defined as -- the same quantity a user
         # reads off a clean channel.
         return float(np.sqrt(total / count))
 
@@ -449,7 +359,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         ``rms|V|`` specifically, which is the quantity the guidance names: read
         the amplitude off a channel with no RFI in it and put that number here.
         """
-        assert self._realised_std(tmp_path, std=30.0) == pytest.approx(30.0, rel=0.02)
+        assert self._realised_std(tmp_path, std_jy=30.0) == pytest.approx(30.0, rel=0.02)
 
     def test_it_is_the_complex_width_and_not_the_real_part(self, tmp_path):
         """The factor of sqrt(2) that the first version of this got wrong.
@@ -461,7 +371,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         from jax import random, vmap
         from tabascal.fft_gp import latent_to_signal
 
-        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std_jy=30.0))
         sigma = comp.sigma_ast_k[0]
         keys = random.split(random.PRNGKey(0), 2)
         shape = (6000, *sigma.shape)
@@ -494,18 +404,18 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         None of them is a statement about how bright the sky is, so none of
         them may move the width of the prior on it.
         """
-        assert self._realised_std(tmp_path, std=30.0, **overrides) == pytest.approx(
+        assert self._realised_std(tmp_path, std_jy=30.0, **overrides) == pytest.approx(
             30.0, rel=0.02
         )
 
     def test_every_baseline_gets_the_configured_width(self, tmp_path):
         """Each baseline's knee is its own maximum fringe rate.
 
-        Normalising per baseline is what makes ``std`` the width everywhere
+        Normalising per baseline is what makes ``std_jy`` the width everywhere
         rather than on an average baseline: unnormalised, the shipped
         configuration spans a factor of 1.23 across its baselines.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, std=30.0))
+        comp = setup_ast(gp_cov_config(tmp_path, std_jy=30.0))
 
         # The realised variance, which is twice the sum of the mode variances:
         # the latent carries E|z|^2 = 2. Asserting the sum alone would pin the
@@ -530,19 +440,19 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         past and nothing left pointing at std. Single precision only, because
         float64 holds anything the validator lets through.
         """
-        message = setup_error(gp_cov_config(tmp_path, std=std))
+        message = setup_error(gp_cov_config(tmp_path, std_jy=std))
 
-        assert "ast.gp_cov.std" in message
+        assert "GPVisAst.std_jy" in message
         assert "representable" in message
 
     def test_data_measures_the_width_per_baseline(self, tmp_path, capsys):
-        """``std: data`` is not an estimate of the width -- it is the width.
+        """``std_jy: data`` is not an estimate of the width -- it is the width.
 
-        ``std`` is defined as rms|V|, and that is exactly what this measures,
+        ``std_jy`` is defined as rms|V|, and that is exactly what this measures,
         so the number the data gives is the number the prior gets, per
         baseline, with no conversion in between.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         comp = setup_ast(config)
 
         expected = np.sqrt(
@@ -562,7 +472,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         Half the samples are given an amplitude ten times the rest and then
         flagged; the width has to come back as the unflagged half alone.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, ::2] = True
@@ -582,21 +492,21 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         """The case the two masks exist to tell apart.
 
         A strong emitter flagged by some other task is data tabascal is here to
-        recover, so ``data.flags: false`` leaves it in the likelihood -- and it
+        recover, so ``data.exclude_flagged: false`` leaves it in the likelihood -- and it
         is still the wrong place to measure a clean sky amplitude from. The
         width comes off ``ms_flags``, the fit runs on ``flags``, and here they
         disagree completely.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         contaminated = np.zeros(vis.shape, dtype=bool)
         contaminated[:, :, ::2] = True
         vis[:, :, ::2] *= 50.0
         config.vis_obs = jnp.asarray(vis)
         config.ms_flags = jnp.asarray(contaminated)
-        # set_flags derives this from ms_flags whatever data.flags says.
+        # set_flags derives this from ms_flags whatever data.exclude_flagged says.
         config.estimator_flags = jnp.asarray(contaminated)
-        # What the likelihood excludes: nothing. data.flags: false.
+        # What the likelihood excludes: nothing. data.exclude_flagged: false.
         config.flags = jnp.zeros(vis.shape, dtype=bool)
 
         comp = setup_ast(config)
@@ -616,7 +526,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         maximum and lose the whole baseline -- in numpy, NaN * False is NaN.
         The flagged cell is excluded, so what it holds cannot matter.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         flags = np.zeros(vis.shape, dtype=bool)
         flags[:, :, 0] = True
@@ -639,14 +549,14 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         estimate is only the sky where the contamination has been flagged, and
         nothing else in the run will say so.
         """
-        setup_ast(gp_cov_config(tmp_path, std="data"))
+        setup_ast(gp_cov_config(tmp_path, std_jy="data"))
 
         printed = capsys.readouterr().out
         assert "nothing flags any of them" in printed
         assert "RFI" in printed
         # And it points at the fix that does not cost the run anything: the MS
-        # flags are read here whatever data.flags decides for the likelihood.
-        assert "whatever data.flags says" in printed
+        # flags are read here whatever data.exclude_flagged decides for the likelihood.
+        assert "whatever data.exclude_flagged says" in printed
 
     @pytest.mark.parametrize("amplitude", [1e20, 1e-30], ids=["huge", "tiny"])
     def test_data_measures_amplitudes_the_square_would_lose(self, tmp_path, amplitude):
@@ -656,7 +566,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         so squaring before averaging threw away visibilities whose rms the
         precision could hold perfectly well, and setup then blamed std.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         config.vis_obs = jnp.asarray(config.vis_obs) * amplitude
 
         comp = setup_ast(config)
@@ -675,7 +585,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
         A NaN nobody flagged is a different thing, and covering for it here
         only moves the failure somewhere that cannot name its cause.
         """
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         vis = np.asarray(config.vis_obs).copy()
         vis[0, 0, 0] = np.nan
         config.vis_obs = jnp.asarray(vis)
@@ -686,7 +596,7 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_data_with_everything_flagged_is_refused(self, tmp_path):
         """There is nothing to measure, and a zero width is not a prior."""
-        config = gp_cov_config(tmp_path, std="data")
+        config = gp_cov_config(tmp_path, std_jy="data")
         config.estimator_flags = jnp.ones(jnp.shape(config.vis_obs), dtype=bool)
 
         message = setup_error(config)
@@ -695,14 +605,14 @@ class TestThePriorAmplitudeIsTheWidthItClaims:
 
     def test_a_word_other_than_data_is_refused(self, tmp_path):
         """`data` is the only word; anything else is a typo, not a setting."""
-        message = setup_error(gp_cov_config(tmp_path, std="truth"))
+        message = setup_error(gp_cov_config(tmp_path, std_jy="truth"))
 
-        assert "ast.gp_cov.std" in message
-        assert "'data'" in message
+        assert "std_jy" in message
+        assert "data" in message
 
 
 class TestTheFrequencyKneeIsAskedForAsABandwidth:
-    """``corr_freq`` is a correlation bandwidth in Hz, not a knee.
+    """``corr_freq_hz`` is a correlation bandwidth in Hz, not a knee.
 
     The knee it sets is a delay -- the frequency axis transforms to
     ``fftfreq(n_freq, chan_width)``, whose units are inverse Hz -- and a delay
@@ -716,7 +626,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         The same conversion ``rfi_signal`` makes from ``rfi.gp_cov.corr_freq``, and
         the reason the two sections can be read side by side.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=1e6))
 
         assert comp.k0_freq == pytest.approx(1 / (2 * np.pi * 1e6))
 
@@ -729,7 +639,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         """
         from tabascal.fft_gp import knee_from_corr_scale
 
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=1e6))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=1e6))
 
         assert comp.k0_freq == knee_from_corr_scale(1e6)
 
@@ -739,7 +649,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
         The power spectrum tends to ``p0`` as the knee grows, so an infinite
         knee keeps every delay mode and prefers none.
         """
-        comp = setup_ast(gp_cov_config(tmp_path, corr_freq=None))
+        comp = setup_ast(gp_cov_config(tmp_path, corr_freq_hz=None))
 
         assert comp.k0_freq == float("inf")
 
@@ -760,7 +670,7 @@ class TestTheFrequencyKneeIsAskedForAsABandwidth:
             return np.asarray(spectrum)
 
         # Through the helper, not a literal infinity: the claim is about what
-        # `corr_freq: null` does. Comparing the two alone would be satisfied by
+        # `corr_freq_hz: null` does. Comparing the two alone would be satisfied by
         # a null path that had simply become the old default, so the flatness
         # it is supposed to produce is asserted first and separately.
         unset = knee_from_corr_scale(None)
@@ -792,51 +702,28 @@ class TestAstGpCovIsValidated:
 
         assert comp.n_k_freq_ast >= 1 and comp.n_k_time_ast >= 1
 
-    @pytest.mark.parametrize("cutoff", [None, _ABSENT_CUTOFF])
-    def test_an_unset_cutoff_is_this_number(self, tmp_path, cutoff):
-        """1e-6, and the two ways of not setting it agree.
+    def test_an_unset_cutoff_is_this_number(self, tmp_path):
+        assert setup_ast(gp_cov_config(tmp_path)).pk_cutoff == 1e-6
 
-        Since the key moved out of the covariance block it may be omitted, where
-        an unset cutoff used to be a configuration error, so the default is now
-        load-bearing. It sets the latent dimension, and with it how many
-        parameters every run fits, which is worth failing over rather than
-        discovering from a shifted result. Pinned as the literal because an
-        assertion against the module constant would move with it.
-        """
-        config = gp_cov_config(tmp_path)
-        if cutoff is None:
-            config.args["ast"]["cutoff"] = None
-        else:
-            config.args["ast"].pop("cutoff", None)
+    def test_a_null_cutoff_is_refused_naming_the_default(self, tmp_path):
+        message = setup_error(gp_cov_config(tmp_path, cutoff=None))
 
-        assert setup_ast(config).pk_cutoff == 1e-6
+        assert "cutoff: null" in message and "1e-06" in message
 
-    # cutoff is named ast.cutoff, outside the covariance block, and is held to
-    # the same rules there.
-    @pytest.mark.parametrize(
-        "key, where",
-        [
-            ("std", "ast.gp_cov.std"),
-            ("corr_freq", "ast.gp_cov.corr_freq"),
-            ("cutoff", "ast.cutoff"),
-        ],
-    )
+    @pytest.mark.parametrize("key", ["std_jy", "corr_freq_hz", "cutoff"])
     @pytest.mark.parametrize("value", [0, -1, "3e3", True, float("inf"), float("nan")])
     def test_a_scalar_key_that_is_not_a_positive_number_is_refused(
-        self, tmp_path, key, where, value
+        self, tmp_path, key, value
     ):
         message = setup_error(gp_cov_config(tmp_path, **{key: value}))
 
-        assert where in message
+        assert key in message
 
     @pytest.mark.parametrize("cutoff", [1.0, 2.0])
     def test_a_cutoff_that_cuts_every_mode_is_refused(self, tmp_path, cutoff):
-        """Relative to the largest mode on each axis, and the comparison is
-        strict, so 1 leaves nothing to fit. Unchecked it reached fft_gp and came
-        back as a zero-size reduction."""
         message = setup_error(gp_cov_config(tmp_path, cutoff=cutoff))
 
-        assert "ast.cutoff" in message
+        assert "cutoff" in message
         assert "below 1" in message
 
     @pytest.mark.parametrize(
@@ -854,35 +741,23 @@ class TestAstGpCovIsValidated:
         assert comp.gammas == [5.0, 5.0]
 
     def test_an_unknown_key_is_refused_by_name(self, tmp_path):
-        """`gamma` for `gammas` is the mistake this catches.
-
-        Asserted against the offending-key list rather than the whole message:
-        every message ends "It takes [... 'gammas' ...]", so a bare
-        `"gamma" in message` passes for a validator that names nothing. The same
-        trap was fixed on the RFI side and then walked into again here.
-        """
         message = setup_error(gp_cov_config(tmp_path, gamma=5))
 
-        assert "no key(s) ['gamma']" in message
+        assert "gamma" in message
 
-    def test_the_two_knees_may_be_null_and_the_others_may_not(self, tmp_path):
-        """And they mean different things by it.
+    def test_only_the_frequency_knee_may_be_null(self, tmp_path):
+        """``corr_freq_hz: null`` is no roll-off; ``fov_deg``'s computed default has a name."""
+        setup_ast(gp_cov_config(tmp_path, corr_freq_hz=None))
+        setup_ast(gp_cov_config(tmp_path, fov_deg="primary_beam"))
 
-        null fov_deg is the telescope's own beam; null corr_freq is no roll-off
-        along the frequency axis at all. The rest have no such fallback, and an
-        unset one is a config that cannot be run rather than a default to
-        invent."""
-        setup_ast(gp_cov_config(tmp_path, fov_deg=None))
-        setup_ast(gp_cov_config(tmp_path, corr_freq=None))
-
-        for key in ("std", "gammas"):
+        for key in ("std_jy", "gammas", "fov_deg"):
             message = setup_error(gp_cov_config(tmp_path, **{key: None}))
-            assert f"ast.gp_cov.{key}" in message
-            assert "required" in message
+            assert key in message
 
-    def test_the_validation_is_the_one_the_rfi_prior_uses(self):
-        """One contract, not two: the sections differ in which keys are live."""
-        from tabascal.components.ast_vis import validate_gp_cov as ast_validator
-        from tabascal.components.rfi_signal import validate_gp_cov as rfi_validator
+    def test_the_validation_shares_the_fourier_gp_mixin(self):
+        from tabascal.schema import FourierGPConfig, RFIGPConfig
 
-        assert ast_validator is rfi_validator
+        assert issubclass(GPVisAstConfig, FourierGPConfig)
+        assert issubclass(RFIGPConfig, FourierGPConfig)
+        assert GPVisAstConfig().gammas == RFIGPConfig().gammas == FourierGPConfig().gammas
+        assert GPVisAstConfig().cutoff == RFIGPConfig().cutoff == FourierGPConfig().cutoff

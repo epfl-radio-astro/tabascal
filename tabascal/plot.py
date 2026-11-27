@@ -275,7 +275,7 @@ def plot_prior(
 ):
 
     start = datetime.now()
-    n_prior = tab_config.args["plots"]["prior_samples"]
+    n_prior = tab_config.config.plots.prior_samples
     print()
     print(f"Plotting {n_prior:.0f} Prior Parameter Samples")
     pred = Predictive(prob_model, num_samples=n_prior)
@@ -304,7 +304,7 @@ def plot_opt(tab_config, vi_pred, truth, run_name, plot_dir):
         tab_config.times,
         pred=vi_pred,
         truth=truth,
-        type=tab_config.args["opt"]["guide"],
+        type="map",
         run_name=run_name,
         max_plots=10,
         save_dir=plot_dir,

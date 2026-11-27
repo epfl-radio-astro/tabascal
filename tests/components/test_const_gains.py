@@ -22,7 +22,8 @@ import numpyro
 import optax
 import pytest
 
-from tabascal.components.gains import ConstGains, validate_gain_scales
+from tabascal.components.gains import ConstGains, ConstGainsConfig
+from tabascal.schema import ConfigValidationError
 
 from .conftest import make_constants
 
@@ -52,14 +53,14 @@ def make_const_gains_config(
     n_freq=3,
     n_time=4,
     amp_mean=1.0,
-    amp_std=10.0,      # percent, as the config gives it
-    phase_mean=0.0,
-    phase_std=30.0,    # degrees, as the config gives it
+    amp_std_pct=10.0,
+    phase_mean_deg=0.0,
+    phase_std_deg=30.0,
     init="prior",
     ref_ant=None,
     fix_flux_scale=True,
     fit=None,
-    components=("gains:ConstGains",),
+    components=("gains.ConstGains",),
     flagged_ants=(),
     flags=None,
 ):
@@ -68,6 +69,28 @@ def make_const_gains_config(
     if flags is None:
         flags = make_flags(n_ant, n_freq, n_time, flagged_ants)
 
+    # A path for init is the measured gain: init: est, with est naming it.
+    est = None
+    if init not in (None, "prior", "est"):
+        init, est = "est", init
+    # None here is "not given", so the component's own default applies.
+    gains_kwargs = {
+        key: value
+        for key, value in {
+            "amp_mean": amp_mean,
+            "amp_std_pct": amp_std_pct,
+            "phase_mean_deg": phase_mean_deg,
+            "phase_std_deg": phase_std_deg,
+            "init": init,
+            "est": est,
+            "ref_ant": ref_ant,
+            "fix_flux_scale": fix_flux_scale,
+            "fit": fit,
+        }.items()
+        if value is not None
+    }
+    comp_specs = [SimpleNamespace(ref=c.replace(":", ".")) for c in components]
+    comp_names = [c.replace(":", ".").split(".")[-1] for c in components]
     return SimpleNamespace(
         n_ant=n_ant,
         n_bl=len(a1),
@@ -76,20 +99,22 @@ def make_const_gains_config(
         a1=jnp.asarray(a1),
         a2=jnp.asarray(a2),
         flags=jnp.asarray(np.asarray(flags)),
-        args={
-            "gains": {
-                "amp_mean": amp_mean,
-                "amp_std": amp_std,
-                "phase_mean": phase_mean,
-                "phase_std": phase_std,
-                "init": init,
-                "ref_ant": ref_ant,
-                "fix_flux_scale": fix_flux_scale,
-                "fit": fit,
-            },
-            "model": {"components": list(components)},
-        },
+        config=SimpleNamespace(
+            model=SimpleNamespace(
+                components=comp_specs,
+                component_class_names=lambda: list(comp_names),
+            )
+        ),
+        _gains_kwargs=gains_kwargs,
     )
+
+
+def setup_const_gains(cfg=None, **kwargs):
+    if cfg is None:
+        cfg = make_const_gains_config(**kwargs)
+    comp = ConstGains(cfg._gains_kwargs)
+    comp.setup(cfg)
+    return comp
 
 
 def make_vis_state(n_ant, n_freq, n_time, seed=0):
@@ -192,8 +217,7 @@ class TestGauge:
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_log_amplitude_is_zero_sum(self, seed, exact_rtol):
         """mean(log|g|) is zero for any parameter draw: the flux scale is not fitted."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=7))
+        comp = setup_const_gains(make_const_gains_config(n_ant=7))
 
         out = run_forward(comp, random_params(comp, seed=seed))
         mean_log_amp = jnp.mean(jnp.log(jnp.abs(out["gains"][:, 0, 0])))
@@ -203,8 +227,7 @@ class TestGauge:
     @pytest.mark.parametrize("ref_ant", [0, 3, 6])
     def test_reference_antenna_phase_is_exactly_zero(self, ref_ant):
         """The reference gain is exactly real and positive — not merely close to it."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=7, ref_ant=ref_ant))
+        comp = setup_const_gains(make_const_gains_config(n_ant=7, ref_ant=ref_ant))
 
         out = run_forward(comp, random_params(comp, seed=3))
         g_ref = out["gains"][ref_ant]
@@ -215,8 +238,7 @@ class TestGauge:
 
     def test_free_antennas_are_not_pinned(self):
         """Only the reference antenna is pinned: the rest carry a non-zero phase."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, ref_ant=2))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, ref_ant=2))
 
         out = run_forward(comp, random_params(comp, seed=4))
         phase = np.angle(np.asarray(out["gains"][:, 0, 0]))
@@ -225,8 +247,7 @@ class TestGauge:
 
     def test_amplitude_spread_survives_the_gauge(self):
         """The zero-sum constraint removes the overall scale, not the relative amplitudes."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=6))
+        comp = setup_const_gains(make_const_gains_config(n_ant=6))
 
         amp = np.abs(np.asarray(run_forward(comp, random_params(comp, seed=5))["gains"][:, 0, 0]))
 
@@ -242,8 +263,7 @@ class TestForward:
 
     def test_output_shapes(self):
         n_ant, n_freq, n_time = 5, 3, 4
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time))
 
         out = run_forward(comp, random_params(comp))
 
@@ -254,8 +274,7 @@ class TestForward:
 
     def test_gains_are_constant_over_frequency_and_time(self):
         """Exactly constant — the whole point of the component."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, n_freq=3, n_time=4))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, n_freq=3, n_time=4))
 
         gains = run_forward(comp, random_params(comp, seed=6))["gains"]
 
@@ -263,9 +282,8 @@ class TestForward:
 
     def test_vis_obs_is_the_gain_product(self, exact_rtol):
         """vis_obs = g_p conj(g_q) (vis_ast + vis_rfi), against an independent reference."""
-        comp = ConstGains()
         cfg = make_const_gains_config(n_ant=5, n_freq=2, n_time=3, ref_ant=1)
-        comp.setup(cfg)
+        comp = setup_const_gains(cfg)
 
         params = random_params(comp, seed=7)
         state = make_vis_state(comp.n_ant, comp.n_freq, comp.n_time)
@@ -286,24 +304,21 @@ class TestForward:
         assert jnp.allclose(out["vis_obs"], expected, rtol=exact_rtol, atol=exact_rtol)
 
     def test_forward_preserves_other_state_keys(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config())
+        comp = setup_const_gains(make_const_gains_config())
         state = make_vis_state(comp.n_ant, comp.n_freq, comp.n_time)
         state["some_extra_key"] = jnp.array(42.0)
 
         assert "some_extra_key" in run_forward(comp, random_params(comp), state)
 
     def test_state_outputs_shapes(self):
-        comp = ConstGains()
         cfg = make_const_gains_config(n_ant=4, n_freq=2, n_time=5)
-        comp.setup(cfg)
+        comp = setup_const_gains(cfg)
 
         assert comp.state_outputs["gains"].shape == (4, 2, 5)
         assert comp.state_outputs["vis_obs"].shape == (cfg.n_bl, 2, 5)
 
     def test_set_params_shapes_in_a_numpyro_trace(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=6))
+        comp = setup_const_gains(make_const_gains_config(n_ant=6))
 
         with numpyro.handlers.seed(rng_seed=0):
             params = comp.build_set_params()({})
@@ -324,8 +339,7 @@ class TestLatentParameterisation:
 
     def test_parameter_count_is_two_n_ant_minus_two(self):
         """n_ant - 1 amplitudes and n_ant - 1 phases: the gauge costs one of each."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=8))
+        comp = setup_const_gains(make_const_gains_config(n_ant=8))
 
         n_params = sum(int(np.size(v)) for v in comp.init_params_base.values())
 
@@ -334,8 +348,7 @@ class TestLatentParameterisation:
         assert n_params == 2 * 8 - 2
 
     def test_freeing_the_flux_scale_restores_the_amplitude_parameter(self):
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=8,
                 fix_flux_scale=False,
@@ -350,8 +363,7 @@ class TestLatentParameterisation:
 
     def test_the_amplitude_basis_is_orthonormal_and_zero_sum(self, exact_rtol):
         n_ant = 7
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant))
 
         H = np.asarray(comp.amp_basis)
 
@@ -369,8 +381,7 @@ class TestLatentParameterisation:
         projector, with no flat latent direction left over.
         """
         n_ant = 7
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant))
 
         H = np.asarray(comp.amp_basis)
         projector = np.eye(n_ant) - np.ones((n_ant, n_ant)) / n_ant
@@ -395,8 +406,7 @@ class TestLatentParameterisation:
         Jacobian was (n_ant, n_ant) of rank n_ant - 1 — the all-ones direction.
         """
         n_ant = 6
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=n_ant, fix_flux_scale=fix_flux_scale, components=components
             )
@@ -419,8 +429,7 @@ class TestLatentParameterisation:
     def test_no_latent_phase_direction_is_flat(self):
         """The same statement for the phase block, which pins by omission already."""
         n_ant = 6
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, ref_ant=2))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, ref_ant=2))
 
         params = random_params(comp, seed=12)
         state = make_vis_state(n_ant, comp.n_freq, comp.n_time)
@@ -445,21 +454,18 @@ class TestLatentParameterisation:
 class TestRefAnt:
 
     def test_default_is_the_first_antenna(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5))
 
         assert comp.ref_ant == 0
 
     def test_default_skips_a_fully_flagged_antenna(self):
         """A dead antenna cannot carry the phase reference, so the default steps past it."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, flagged_ants=(0, 1)))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, flagged_ants=(0, 1)))
 
         assert comp.ref_ant == 2
 
     def test_explicit_reference_is_honoured(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, ref_ant=3))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, ref_ant=3))
 
         assert comp.ref_ant == 3
         out = run_forward(comp, random_params(comp, seed=8))
@@ -467,28 +473,28 @@ class TestRefAnt:
 
     def test_fully_flagged_explicit_reference_is_an_error(self):
         with pytest.raises(RuntimeError, match="ref_ant"):
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(n_ant=5, ref_ant=1, flagged_ants=(1,))
             )
 
     def test_out_of_range_reference_is_an_error(self):
         with pytest.raises(RuntimeError, match="ref_ant"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, ref_ant=5))
+            setup_const_gains(make_const_gains_config(n_ant=5, ref_ant=5))
 
     def test_non_integer_reference_is_an_error(self):
-        with pytest.raises(RuntimeError, match="ref_ant"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, ref_ant="ant3"))
+        with pytest.raises(ConfigValidationError, match="ref_ant"):
+            setup_const_gains(make_const_gains_config(n_ant=5, ref_ant="ant3"))
 
     def test_all_antennas_flagged_is_an_error(self):
         with pytest.raises(RuntimeError, match="fully flagged"):
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(n_ant=4, flagged_ants=(0, 1, 2, 3))
             )
 
     def test_an_observation_with_no_baselines_is_an_error(self):
         """A single antenna correlates with nothing, so no gain is measured at all."""
         with pytest.raises(RuntimeError, match="no baselines"):
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(n_ant=1, flags=np.zeros((0, 3, 4), dtype=bool))
             )
 
@@ -520,13 +526,13 @@ class TestConnectivity:
         flags = keep_only_baselines(4, 2, 2, [(0, 1), (2, 3)])
 
         with pytest.raises(RuntimeError, match="no baseline"):
-            ConstGains().setup(make_const_gains_config(n_ant=4, n_freq=2, n_time=2, flags=flags))
+            setup_const_gains(make_const_gains_config(n_ant=4, n_freq=2, n_time=2, flags=flags))
 
     def test_the_error_names_the_groups(self):
         flags = keep_only_baselines(5, 2, 2, [(0, 1), (2, 3), (2, 4), (3, 4)])
 
         with pytest.raises(RuntimeError) as excinfo:
-            ConstGains().setup(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
+            setup_const_gains(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
 
         message = str(excinfo.value)
         assert "[0, 1]" in message
@@ -536,15 +542,13 @@ class TestConnectivity:
         """A bare spanning chain is still one group, and is accepted."""
         flags = keep_only_baselines(5, 2, 2, [(0, 1), (1, 2), (2, 3), (3, 4)])
 
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, n_freq=2, n_time=2, flags=flags))
 
         assert comp.ref_ant == 0
 
     def test_an_isolated_flagged_antenna_does_not_count_as_a_group(self):
         """Antenna 0 has no data at all — it is skipped, not called a second group."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, flagged_ants=(0,)))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, flagged_ants=(0,)))
 
         assert comp.ref_ant == 1
 
@@ -557,22 +561,20 @@ class TestConnectivity:
 class TestFixFluxScale:
 
     def test_default_is_constrained(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config())
+        comp = setup_const_gains(make_const_gains_config())
 
         assert comp.fix_flux_scale is True
 
     def test_free_flux_scale_without_a_fixed_sky_is_an_error(self):
         with pytest.raises(RuntimeError, match="fix_flux_scale"):
-            ConstGains().setup(make_const_gains_config(fix_flux_scale=False))
+            setup_const_gains(make_const_gains_config(fix_flux_scale=False))
 
     def test_the_error_explains_the_degeneracy(self):
         with pytest.raises(RuntimeError, match="FixedDiscreteSky"):
-            ConstGains().setup(make_const_gains_config(fix_flux_scale=False))
+            setup_const_gains(make_const_gains_config(fix_flux_scale=False))
 
     def test_free_flux_scale_with_a_fixed_sky_is_allowed(self):
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 fix_flux_scale=False,
                 components=(
@@ -587,8 +589,7 @@ class TestFixFluxScale:
 
     def test_free_flux_scale_leaves_the_mean_log_amplitude_free(self):
         """Without the constraint the overall scale is a fitted quantity again."""
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=7,
                 fix_flux_scale=False,
@@ -605,12 +606,11 @@ class TestFixFluxScale:
         assert abs(mean_log_amp) > 1e-3
 
     def test_a_non_boolean_flag_is_an_error(self):
-        with pytest.raises(RuntimeError, match="fix_flux_scale"):
-            ConstGains().setup(make_const_gains_config(fix_flux_scale="yes"))
+        with pytest.raises(ConfigValidationError, match="fix_flux_scale"):
+            setup_const_gains(make_const_gains_config(fix_flux_scale="yes"))
 
     def test_null_means_the_default(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(fix_flux_scale=None))
+        comp = setup_const_gains(make_const_gains_config(fix_flux_scale=None))
 
         assert comp.fix_flux_scale is True
 
@@ -625,14 +625,12 @@ class TestFit:
         [
             (None, {"gains_amp_base", "gains_phase_base"}),
             ("complex", {"gains_amp_base", "gains_phase_base"}),
-            ("both", {"gains_amp_base", "gains_phase_base"}),
             ("amplitude", {"gains_amp_base"}),
             ("phase", {"gains_phase_base"}),
         ],
     )
     def test_only_the_chosen_blocks_are_parameters(self, fit, blocks):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=6, fit=fit))
+        comp = setup_const_gains(make_const_gains_config(n_ant=6, fit=fit))
         with numpyro.handlers.seed(rng_seed=0):
             sampled = comp.build_set_params()({})
 
@@ -641,8 +639,8 @@ class TestFit:
 
     @pytest.mark.parametrize("fit", ["Amplitude", "amp", 1, True])
     def test_an_unknown_mode_is_an_error(self, fit):
-        with pytest.raises(RuntimeError, match="gains:\n\tfit"):
-            ConstGains().setup(make_const_gains_config(fit=fit))
+        with pytest.raises(ConfigValidationError, match="fit"):
+            setup_const_gains(make_const_gains_config(fit=fit))
 
     @pytest.mark.parametrize("fit, held", [("amplitude", "phase"), ("phase", "amp")])
     @pytest.mark.parametrize("fix_flux_scale", [True, False])
@@ -652,8 +650,7 @@ class TestFit:
         rng = np.random.default_rng(3)
         g = rng.uniform(0.4, 2.5, n_ant) * np.exp(1j * rng.uniform(-2.0, 2.0, n_ant))
         np.savez(tmp_path / "gain.npz", gain=g)
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=n_ant, init=str(tmp_path / "gain.npz"), ref_ant=2, fit=fit,
                 fix_flux_scale=fix_flux_scale, components=self.FREE_SKY,
@@ -674,10 +671,9 @@ class TestFit:
     @pytest.mark.parametrize("fit", ["amplitude", "phase"])
     def test_without_a_measured_gain_the_held_block_is_unity(self, exact_rtol, init, fit):
         """amp_mean and phase_mean place only the fitted block; the held one is |g| = 1 or 0 rad."""
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
-                init=init, fit=fit, amp_mean=2.0, phase_mean=0.5, ref_ant=0,
+                init=init, fit=fit, amp_mean=2.0, phase_mean_deg=30.0, ref_ant=0,
                 fix_flux_scale=False, components=self.FREE_SKY,
             )
         )
@@ -686,26 +682,26 @@ class TestFit:
 
         if fit == "phase":
             assert np.allclose(np.abs(g), 1.0, rtol=exact_rtol, atol=exact_rtol)
-            assert np.allclose(np.angle(start[1:]), 0.5, rtol=exact_rtol, atol=exact_rtol)
+            assert np.allclose(np.angle(start[1:]), np.deg2rad(30.0), rtol=exact_rtol, atol=exact_rtol)
         else:
             assert np.allclose(np.angle(g), 0.0, rtol=exact_rtol, atol=exact_rtol)
             assert np.allclose(np.abs(start), 2.0, rtol=exact_rtol, atol=exact_rtol)
 
     def test_a_phase_only_fit_frees_the_flux_scale_without_a_fixed_sky(self):
         """No amplitude is fitted, so no fixed sky is needed."""
-        ConstGains().setup(make_const_gains_config(fit="phase", fix_flux_scale=False))
+        setup_const_gains(make_const_gains_config(fit="phase", fix_flux_scale=False))
 
     def test_an_amplitude_only_fit_accepts_a_split_array(self):
         """Only a fitted phase needs a chain of baselines back to the reference."""
         flags = keep_only_baselines(6, 3, 4, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)])
-        ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="amplitude"))
+        setup_const_gains(make_const_gains_config(n_ant=6, flags=flags, fit="amplitude"))
 
         with pytest.raises(RuntimeError, match="groups"):
-            ConstGains().setup(make_const_gains_config(n_ant=6, flags=flags, fit="phase"))
+            setup_const_gains(make_const_gains_config(n_ant=6, flags=flags, fit="phase"))
 
     def test_an_amplitude_only_fit_with_a_free_scale_still_needs_a_fixed_sky(self):
         with pytest.raises(RuntimeError, match="FixedDiscreteSky"):
-            ConstGains().setup(make_const_gains_config(fit="amplitude", fix_flux_scale=False))
+            setup_const_gains(make_const_gains_config(fit="amplitude", fix_flux_scale=False))
 
 
 # ---------------------------------------------------------------------------
@@ -717,9 +713,8 @@ class TestAmpMean:
 
     def test_the_fixed_gauge_starts_at_unit_gain_whatever_amp_mean_says(self, exact_rtol):
         """Under the zero-sum gauge the geometric mean of |g| is 1 by construction."""
-        comp = ConstGains()
         with pytest.warns(UserWarning, match="amp_mean"):
-            comp.setup(make_const_gains_config(n_ant=5, amp_mean=2.0))
+            comp = setup_const_gains(make_const_gains_config(n_ant=5, amp_mean=2.0))
 
         amp = np.abs(np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0]))
 
@@ -727,17 +722,16 @@ class TestAmpMean:
 
     def test_a_non_unit_amp_mean_warns_under_the_fixed_gauge(self):
         with pytest.warns(UserWarning, match="fix_flux_scale"):
-            ConstGains().setup(make_const_gains_config(amp_mean=1.4))
+            setup_const_gains(make_const_gains_config(amp_mean=1.4))
 
     def test_a_unit_amp_mean_does_not_warn(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            ConstGains().setup(make_const_gains_config(amp_mean=1.0))
+            setup_const_gains(make_const_gains_config(amp_mean=1.0))
 
     def test_the_free_scale_starts_at_amp_mean(self, exact_rtol):
         """With the scale free, amp_mean is the prior mean it actually starts at."""
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=5,
                 amp_mean=2.0,
@@ -752,12 +746,11 @@ class TestAmpMean:
 
     def test_the_free_scale_prior_is_lognormal_about_amp_mean(self, exact_rtol):
         """A one-sigma draw sits at amp_mean * exp(amp_std), the log-space spread."""
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=5,
                 amp_mean=2.0,
-                amp_std=10.0,  # percent
+                amp_std_pct=10.0,  # percent
                 fix_flux_scale=False,
                 components=("ast_signal:FixedDiscreteSky", "gains:ConstGains"),
             )
@@ -781,12 +774,11 @@ class TestAmpMean:
         is not positive and finite is a mistake worth naming rather than a default
         worth guessing.
         """
-        with pytest.raises(RuntimeError, match="amp_mean"):
-            ConstGains().setup(make_const_gains_config(amp_mean=amp_mean))
+        with pytest.raises(ConfigValidationError, match="amp_mean"):
+            setup_const_gains(make_const_gains_config(amp_mean=amp_mean))
 
     def test_an_unset_amp_mean_still_defaults(self):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(amp_mean=None))
+        comp = setup_const_gains(make_const_gains_config(amp_mean=None))
 
         assert comp.gp_amp_mean == 1.0
 
@@ -797,7 +789,7 @@ class TestAmpMean:
 
 
 class TestScaleKeysReachTheComponent:
-    """What :func:`validate_gain_scales` decides, ``ConstGains`` is the one that uses.
+    """What :class:`ConstGainsConfig` decides, ``ConstGains`` is the one that uses.
 
     The unit tests of the reads themselves live in ``test_gains.py``; these check the
     decision survives the trip through setup, whose ``except`` wraps a ``ValueError``
@@ -805,35 +797,34 @@ class TestScaleKeysReachTheComponent:
     """
 
     @pytest.mark.parametrize("width", [0, 0.0, -1.0, float("nan"), float("inf")])
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     def test_an_unusable_prior_width_is_an_error(self, key, width):
         """A zero width used to be read as "unset" and silently become the default.
 
-        ``phase_std`` divides the initial phase in :meth:`_compute_init_params` and
+        ``phase_std_deg`` divides the initial phase in :meth:`_compute_init_params` and
         both widths scale a standard normal, so a degenerate width is a mistake worth
         naming rather than a default worth guessing.
         """
         cfg = make_const_gains_config()
-        cfg.args["gains"][key] = width
+        cfg._gains_kwargs[key] = width
 
-        with pytest.raises(RuntimeError, match=key):
-            ConstGains().setup(cfg)
+        with pytest.raises(ConfigValidationError, match=key):
+            setup_const_gains(cfg)
 
-    @pytest.mark.parametrize("key", ["amp_std", "phase_std"])
+    @pytest.mark.parametrize("key", ["amp_std_pct", "phase_std_deg"])
     def test_an_unset_prior_width_still_defaults(self, key):
         cfg = make_const_gains_config()
-        cfg.args["gains"][key] = None
-        comp = ConstGains()
-        comp.setup(cfg)
+        del cfg._gains_kwargs[key]
+        comp = setup_const_gains(cfg)
 
-        expected = {"amp_std": 0.2, "phase_std": float(jnp.deg2rad(180))}[key]
+        expected = {"amp_std_pct": 0.2, "phase_std_deg": float(jnp.deg2rad(180))}[key]
 
-        assert getattr(comp, {"amp_std": "gp_amp_std", "phase_std": "gp_phase_std"}[key]) == pytest.approx(expected)
+        assert getattr(comp, {"amp_std_pct": "gp_amp_std", "phase_std_deg": "gp_phase_std"}[key]) == pytest.approx(expected)
 
     def test_the_default_phase_width_puts_a_whole_turn_inside_one_sigma(self, tmp_path):
         """180 degrees is half a turn, so any measured phase starts within |z| <= 1.
 
-        ``phase_std`` divides the measured phase in :meth:`_compute_init_params`, so
+        ``phase_std_deg`` divides the measured phase in :meth:`_compute_init_params`, so
         the width decides where a gain read in from outside starts the fit: under the
         1-degree default an ordinary phase started it ~100 sigma from the prior mean,
         in a coordinate the optimiser then had to walk back one ``opt.epsilon`` step
@@ -847,9 +838,8 @@ class TestScaleKeysReachTheComponent:
         path = tmp_path / "gain.npz"
         np.savez(path, gain=g)
 
-        comp = ConstGains()
-        comp.setup(
-            make_const_gains_config(n_ant=n_ant, phase_std=None, init=str(path))
+        comp = setup_const_gains(
+            make_const_gains_config(n_ant=n_ant, phase_std_deg=None, init=str(path))
         )
 
         base = np.asarray(comp.init_params_base["gains_phase_base"])
@@ -857,16 +847,15 @@ class TestScaleKeysReachTheComponent:
         assert np.all(np.abs(base) <= 1.0)
         # And the width really is what bounds it: the old default puts the same gain
         # far outside the prior.
-        narrow = ConstGains()
-        narrow.setup(
-            make_const_gains_config(n_ant=n_ant, phase_std=1.0, init=str(path))
+        narrow = setup_const_gains(
+            make_const_gains_config(n_ant=n_ant, phase_std_deg=1.0, init=str(path))
         )
 
         assert np.max(np.abs(np.asarray(narrow.init_params_base["gains_phase_base"]))) > 100
 
 
 class TestTheDefaultPhasePriorCoversTheCircle:
-    """Drawn through the component, the unset ``phase_std`` says nothing about the phase.
+    """Drawn through the component, the unset ``phase_std_deg`` says nothing about the phase.
 
     The width itself is checked analytically in ``test_gains.py`` (the wrapped normal
     at half a turn is flat to 1.4 %). What is checked here is that the component's own
@@ -888,17 +877,16 @@ class TestTheDefaultPhasePriorCoversTheCircle:
     N_ANT = 33
     N_DRAWS = 512
 
-    def draw_phases(self, phase_std):
+    def draw_phases(self, phase_std_deg):
         """Gain phases from ``N_DRAWS`` prior draws, through the component's forward.
 
         The reference antenna's phase is pinned to zero (the overall phase is not
         observable), so it is dropped: a gauge choice rather than a draw.
         """
 
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
-                n_ant=self.N_ANT, n_freq=1, n_time=1, phase_std=phase_std, ref_ant=0
+                n_ant=self.N_ANT, n_freq=1, n_time=1, phase_std_deg=phase_std_deg, ref_ant=0
             )
         )
 
@@ -924,7 +912,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
         return np.asarray(phases).ravel()
 
     def test_the_default_prior_covers_the_circle(self):
-        phases = self.draw_phases(phase_std=None)
+        phases = self.draw_phases(phase_std_deg=None)
         counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
 
         assert counts.min() > 0
@@ -936,7 +924,7 @@ class TestTheDefaultPhasePriorCoversTheCircle:
     def test_a_one_degree_prior_does_not(self):
         """The teeth of the test above: the default it replaces fails both bounds."""
 
-        phases = self.draw_phases(phase_std=1.0)
+        phases = self.draw_phases(phase_std_deg=1.0)
         counts, _ = np.histogram(phases, bins=self.N_BINS, range=(-np.pi, np.pi))
 
         assert counts.min() == 0
@@ -953,7 +941,7 @@ class TestDegeneracyWarning:
     @pytest.mark.parametrize("signal", ["ComplexRFIVarAnt", "ComplexRFIVarAntFine"])
     def test_warns_with_a_per_antenna_rfi_amplitude(self, signal):
         with pytest.warns(UserWarning, match=rf"\b{signal}\b"):
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(
                     components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
@@ -961,7 +949,7 @@ class TestDegeneracyWarning:
 
     def test_the_warning_names_the_flat_direction_and_the_issue(self):
         with pytest.warns(UserWarning) as record:
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(
                     components=("rfi_signal:ComplexRFIVarAntFine", "gains:ConstGains")
                 )
@@ -975,7 +963,7 @@ class TestDegeneracyWarning:
     def test_does_not_warn_with_a_constant_antenna_rfi_amplitude(self, signal):
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            ConstGains().setup(
+            setup_const_gains(
                 make_const_gains_config(
                     components=(f"rfi_signal:{signal}", "gains:ConstGains")
                 )
@@ -983,9 +971,8 @@ class TestDegeneracyWarning:
 
     def test_the_warning_is_not_an_error(self):
         """Degenerate is not forbidden — the fit still runs."""
-        comp = ConstGains()
         with pytest.warns(UserWarning):
-            comp.setup(
+            comp = setup_const_gains(
                 make_const_gains_config(
                     components=("rfi_signal:ComplexRFIVarAntFine", "gains:ConstGains")
                 )
@@ -1002,8 +989,7 @@ class TestDegeneracyWarning:
 class TestInit:
 
     def test_prior_init_is_unit_gain(self, exact_rtol):
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, init="prior"))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, init="prior"))
 
         out = run_forward(comp, comp.init_params_base)
 
@@ -1011,13 +997,12 @@ class TestInit:
 
     def test_prior_init_sits_at_the_phase_prior_mean(self, exact_rtol):
         """The prior mean of the phase is phase_mean, and the reference is still pinned."""
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=5, phase_mean=0.25, ref_ant=2))
+        comp = setup_const_gains(make_const_gains_config(n_ant=5, phase_mean_deg=15.0, ref_ant=2))
 
         phase = np.angle(np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0]))
 
         assert phase[2] == 0.0
-        assert np.allclose(np.delete(phase, 2), 0.25, rtol=exact_rtol, atol=exact_rtol)
+        assert np.allclose(np.delete(phase, 2), np.deg2rad(15.0), rtol=exact_rtol, atol=exact_rtol)
 
     def test_npz_init_lands_in_the_gauge(self, tmp_path, exact_rtol):
         n_ant = 6
@@ -1026,8 +1011,7 @@ class TestInit:
         path = tmp_path / "gain.npz"
         np.savez(path, gain=g)
 
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, init=str(path), ref_ant=2))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=str(path), ref_ant=2))
 
         fitted = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
 
@@ -1043,8 +1027,7 @@ class TestInit:
         path = tmp_path / "gain.npz"
         np.savez(path, gain=g)
 
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, init=str(path)))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=str(path)))
 
         fitted = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
 
@@ -1058,8 +1041,7 @@ class TestInit:
         path = tmp_path / "gain.npz"
         np.savez(path, gain=g)
 
-        comp = ConstGains()
-        comp.setup(
+        comp = setup_const_gains(
             make_const_gains_config(
                 n_ant=n_ant,
                 init=str(path),
@@ -1079,14 +1061,14 @@ class TestInit:
         np.savez(path, gain=np.ones(3, dtype=complex))
 
         with pytest.raises(RuntimeError, match=r"\(3,\)"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, init=str(path)))
+            setup_const_gains(make_const_gains_config(n_ant=5, init=str(path)))
 
     def test_npz_without_a_gain_key_is_an_error(self, tmp_path):
         path = tmp_path / "gain.npz"
         np.savez(path, gains=np.ones(5, dtype=complex))
 
         with pytest.raises(RuntimeError, match="gain"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, init=str(path)))
+            setup_const_gains(make_const_gains_config(n_ant=5, init=str(path)))
 
     def test_a_zero_gain_is_an_error(self, tmp_path):
         """log|g| of a zero gain is -inf; a dead antenna is not an initialisation."""
@@ -1096,11 +1078,19 @@ class TestInit:
         np.savez(path, gain=g)
 
         with pytest.raises(RuntimeError, match="zero"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, init=str(path)))
+            setup_const_gains(make_const_gains_config(n_ant=5, init=str(path)))
 
-    def test_an_unusable_init_string_is_an_error(self):
-        with pytest.raises(RuntimeError, match="init"):
-            ConstGains().setup(make_const_gains_config(init="truth"))
+    def test_a_path_that_is_no_gain_is_an_error(self):
+        with pytest.raises(RuntimeError, match="est"):
+            setup_const_gains(make_const_gains_config(init="no/such/gains.npz"))
+
+    def test_init_takes_a_name_and_est_the_path(self):
+        with pytest.raises(ValueError, match="init"):
+            ConstGainsConfig(init="gains.npz")
+        with pytest.raises(ValueError, match="est is not set"):
+            ConstGainsConfig(init="est")
+        with pytest.raises(ValueError, match="nothing reads it"):
+            ConstGainsConfig(est="gains.npz")
 
 
 # ---------------------------------------------------------------------------
@@ -1122,8 +1112,7 @@ class TestCaltableInit:
             str(tmp_path / "cal.B"), np.broadcast_to(g[:, None, None], (n_ant, n_freq, n_time))
         )
 
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, init=path, ref_ant=1))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=path, ref_ant=1))
 
         fitted = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
 
@@ -1136,9 +1125,8 @@ class TestCaltableInit:
         varying = g[:, None, None] * (1 + 0.2 * rng.standard_normal((n_ant, n_freq, n_time)))
         path = write_test_caltable(str(tmp_path / "cal.B"), varying)
 
-        comp = ConstGains()
         with pytest.warns(UserWarning, match="varies"):
-            comp.setup(make_const_gains_config(n_ant=n_ant, init=path))
+            comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=path))
 
         fitted = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
         expected = gauge_project(
@@ -1160,7 +1148,7 @@ class TestCaltableInit:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            ConstGains().setup(make_const_gains_config(n_ant=n_ant, init=path))
+            setup_const_gains(make_const_gains_config(n_ant=n_ant, init=path))
 
     def test_flagged_samples_are_dropped_from_the_reduction(self, tmp_path):
         """A flagged solution is missing, not zero — the surviving samples set the gain."""
@@ -1170,8 +1158,7 @@ class TestCaltableInit:
         table_gains[1, 0, :] = 0.0  # written flagged by write_test_caltable
         path = write_test_caltable(str(tmp_path / "cal.B"), table_gains)
 
-        comp = ConstGains()
-        comp.setup(make_const_gains_config(n_ant=n_ant, init=path))
+        comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=path))
 
         fitted = np.asarray(run_forward(comp, comp.init_params_base)["gains"][:, 0, 0])
 
@@ -1184,9 +1171,8 @@ class TestCaltableInit:
         table_gains[2] = 0.0
         path = write_test_caltable(str(tmp_path / "cal.B"), table_gains)
 
-        comp = ConstGains()
         with pytest.warns(UserWarning, match="no solution"):
-            comp.setup(make_const_gains_config(n_ant=n_ant, init=path))
+            comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, init=path))
 
         expected = g.copy()
         expected[2] = 1.0
@@ -1198,7 +1184,7 @@ class TestCaltableInit:
         path = write_test_caltable(str(tmp_path / "cal.B"), np.ones((3, 2, 2), dtype=complex))
 
         with pytest.raises(RuntimeError, match="3"):
-            ConstGains().setup(make_const_gains_config(n_ant=5, init=path))
+            setup_const_gains(make_const_gains_config(n_ant=5, init=path))
 
 
 # ---------------------------------------------------------------------------
@@ -1212,19 +1198,10 @@ def test_component_is_importable_by_config_string():
     assert import_components(["gains:ConstGains"]) == [ConstGains]
 
 
-def test_base_config_carries_the_new_keys():
-    from importlib.resources import files
-
-    from tabascal.config import yaml_load
-
-    base = yaml_load(
-        os.path.join(
-            str(files("tabascal").joinpath("data/config")), "tab_config_base.yaml"
-        )
-    )
-
-    assert base["gains"]["ref_ant"] is None
-    assert base["gains"]["fix_flux_scale"] is True
+def test_schema_defaults_carry_the_new_keys():
+    cfg = ConstGainsConfig()
+    assert cfg.ref_ant == "auto"
+    assert cfg.fix_flux_scale is True
 
 
 def test_the_correlation_lengths_are_not_read_here():
@@ -1235,22 +1212,14 @@ def test_the_correlation_lengths_are_not_read_here():
     """
     cfg = make_const_gains_config()
 
-    assert not [key for key in cfg.args["gains"] if key.endswith(("_corr_freq", "_corr_time"))]
+    assert not [key for key in ConstGainsConfig.model_fields if key.endswith(("_corr_freq", "_corr_time"))]
 
-    comp = ConstGains()
-    comp.setup(cfg)  # no correlation length in the config, and none missed
+    setup_const_gains(cfg)  # no correlation length in the config, and none missed
 
 
-def test_validate_gain_scales_converts_percent_and_degrees():
+def test_prior_scales_convert_percent_and_degrees():
     """The scales reach the component in the units the model works in."""
-    cfg = validate_gain_scales(
-        {
-            "amp_mean": 2.0,
-            "amp_std": 5.0,
-            "phase_mean": None,
-            "phase_std": 2.0,
-        }
-    )
+    cfg = ConstGainsConfig(amp_mean=2.0, amp_std_pct=5.0, phase_std_deg=2.0).prior_scales()
 
     assert cfg["amp_std"] == pytest.approx(5.0 / 100 * 2.0)
     assert cfg["phase_mean"] == pytest.approx(0.0)
@@ -1273,8 +1242,7 @@ def test_map_fit_recovers_known_constant_gains(precision):
     n_ant, n_freq, n_time = 6, 2, 3
     rng = np.random.default_rng(0)
 
-    comp = ConstGains()
-    comp.setup(make_const_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time, ref_ant=0))
+    comp = setup_const_gains(make_const_gains_config(n_ant=n_ant, n_freq=n_freq, n_time=n_time, ref_ant=0))
 
     g_true = gauge_project(
         np.exp(rng.normal(0, 0.15, n_ant)) * np.exp(1j * rng.uniform(-0.6, 0.6, n_ant)), 0

@@ -739,7 +739,7 @@ def partition_noise(
 
     Nothing is invented: if neither column is usable this returns ``None``, after
     saying why, because a made-up noise scale silently re-weights the entire fit.
-    ``None`` rather than an exception because ``data.noise`` is read *after* the
+    ``None`` rather than an exception because ``data.noise_jy`` is read *after* the
     MS -- an override is exactly the answer to an MS with no noise in it, and
     raising here would take its turn away. :meth:`TabConfig.set_noise` is where a
     still-unset noise becomes the error that stops the run.
@@ -788,14 +788,14 @@ def partition_noise(
         print(
             "Warning: the MS partition has neither a usable SIGMA_SPECTRUM nor a "
             "readable SIGMA column, so it carries no noise estimate at all; set "
-            "data.noise explicitly."
+            "data.noise_jy explicitly."
         )
 
         return None
 
     # Only the empty column is deferred. A SIGMA that contradicts the row layout
     # still raises: that is the reader and the MS disagreeing about the
-    # observation, which no data.noise value makes right.
+    # observation, which no data.noise_jy value makes right.
     try:
         return per_baseline_sigma(sigma, n_time, n_bl, corr_idx)
     except NoUsableSigma as err:
@@ -952,7 +952,7 @@ def read_ms(
                 finite = False
         if not finite:
             raise ValueError(
-                f"data.freq is {freq!r}. It is a single frequency in Hz to read "
+                f"data.freq_hz is {freq!r}. It is a single frequency in Hz to read "
                 f"from {ms_path}, whose {len(freqs)} channels run "
                 f"{freqs[0] / 1e6:.4f} - {freqs[-1] / 1e6:.4f} MHz."
             )
@@ -1043,7 +1043,7 @@ def read_ms(
         # time -- never collapsed to a scalar: the antennas differ in
         # sensitivity and the band is not flat, so a single number mis-weights
         # every visibility. See tabascal.noise. None when the MS carries no
-        # usable noise column at all, which data.noise is then read to supply.
+        # usable noise column at all, which data.noise_jy is then read to supply.
         "noise": None if sigma is None else jnp.asarray(sigma),
         "noise_scalar": None if sigma is None else representative_sigma(sigma),
         "a1": jnp.array(layout.a1),

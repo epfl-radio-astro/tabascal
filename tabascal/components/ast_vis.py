@@ -1,53 +1,136 @@
 from math import ceil, isfinite, sqrt
+from typing import Any, FrozenSet, Literal, Optional, Tuple, Union
 
 from jax import checkpoint, lax, vmap, random
 import jax.numpy as jnp
+from pydantic import Field, field_validator
 
 from tabascal.components import Component, assert_attr_shape
 from tabascal.dist import standard_normal
 from tabascal.interferometry import fov_to_eff_diameter, max_ast_fringe_rate
-from tabascal.seeds import component_key, config_seed
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis, validate_cutoff, validate_gp_cov
+from tabascal.schema import (
+    FloatGe1,
+    FourierGPConfig,
+    PositiveFloat,
+    StrictConfigModel,
+    WholePositiveInt,
+    _check_float_ge_1,
+    _check_whole_positive_int,
+)
+from tabascal.seeds import DEFAULT_SEED, component_key
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, latent_to_signal_dft_init, latent_to_signal_dft, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, pow_spec_nd, rms_vis
 from tabascal.timing import measure_runtime
 from tabascal.truth import read_true_vis_ast
 
 
-#: The ``ast.gp_cov`` keys and what each may be, for
-#: :func:`tabascal.fft_gp.validate_gp_cov`. The same keys the RFI prior takes,
-#: except that the time scale is given as a field of view: a sky source's
-#: coherence time is its fringe rate, which follows from how far off axis it is
-#: and not from a number to pick, so the key asks for the angle.
-_GP_COV_RULES = {
-    "std": "amplitude",
-    "corr_freq": "number",
-    "fov_deg": "number",
-    "gammas": "pair",
-}
+class GPVisAstConfig(FourierGPConfig):
+    """Configuration for :class:`GPVisAst`."""
 
-#: Both knees may be null, and mean different things by it. ``fov_deg`` unset is
-#: the telescope's own primary beam, 2 * 1.22 * lambda / D from the dish
-#: diameter in the measurement set, rather than a field of view chosen by hand.
-#: ``corr_freq`` unset is no roll-off along the frequency axis at all, which
-#: the comment above :class:`GPVisAst` explains -- where the RFI prior reads the
-#: same null as half the observed band.
-_GP_COV_OPTIONAL = ("fov_deg", "corr_freq")
+    fov_deg: Union[PositiveFloat, Literal["primary_beam"]] = Field(
+        default="primary_beam",
+        description=(
+            "Full field of view, in degrees, setting the knee along the time axis via "
+            "the fringe rate at fov_deg / 2. 'primary_beam' uses 2 * 1.22 * lambda / D."
+        ),
+    )
+    time_pad_factor: Union[FloatGe1, Literal["auto"]] = Field(
+        default=2.0,
+        description=(
+            "Zero-padding factor along the time axis (>= 1), or 'auto' to pad until "
+            "the first non-zero mode reaches the slowest baseline's fringe rate."
+        ),
+    )
+    transform: Literal["dft", "fft"] = Field(
+        default="dft",
+        description="Inverse transform from latent k-modes to visibilities: 'dft' (default) or 'fft'.",
+    )
+    baseline_block_size: Optional[Union[WholePositiveInt, Literal["auto"]]] = Field(
+        default="auto",
+        description=(
+            "Baselines per scan step in the sky transform: 'auto', a positive whole "
+            "number, or null for a single block over all baselines."
+        ),
+    )
+    init: Literal["sample", "prior", "data", "zeros", "truth"] = Field(
+        default="prior",
+        description=(
+            "Initial astronomical visibility parameters: 'sample', 'prior', 'data', "
+            "'zeros', or 'truth' (requires tab-sim zarr)."
+        ),
+    )
+    mean: Literal["zeros", "data"] = Field(
+        default="zeros",
+        description="Mean of the prior over astronomical visibilities: 'zeros' or 'data'.",
+    )
 
-#: ``ast.cutoff`` when it is left null. What every shipped configuration sets,
-#: kept as the default now that the key may be omitted.
-_DEFAULT_PK_CUTOFF = 1e-6
+    @field_validator("time_pad_factor", mode="before")
+    @classmethod
+    def _validate_time_pad_factor(cls, value: Any) -> Any:
+        if value == "auto":
+            return "auto"
+        return _check_float_ge_1(value)
 
-#: The least ``ast.time_pad_factor: auto`` resolves to. The fringe rate only
+    @field_validator("baseline_block_size", mode="before")
+    @classmethod
+    def _validate_baseline_block_size(cls, value: Any) -> Any:
+        if value in ("auto", None):
+            return value
+        return _check_whole_positive_int(value)
+
+    @field_validator("mean", mode="before")
+    @classmethod
+    def _no_aliases(cls, value: Any) -> Any:
+        if isinstance(value, (bool, int, float)):
+            raise ValueError(f"mean takes 'zeros' or 'data', not {value!r}.")
+        return value
+
+    def requires_truth(self, ref: str = "") -> dict[str, str]:
+        if self.init == "truth":
+            label = f"{ref}.init: truth" if ref else "ast_vis.GPVisAst.init: truth"
+            return {"vis_ast": label}
+        return {}
+
+
+class DiscreteSkyVisConfig(StrictConfigModel):
+    """Configuration for :class:`DiscreteSkyVis`."""
+
+    uvw_sign: Tuple[Literal[-1, 1], Literal[-1, 1], Literal[-1, 1]] = Field(
+        default=(-1, -1, -1),
+        description=(
+            "Sign convention (+1 or -1) for each (u, v, w) axis matching the MS's UVW "
+            "definition; default [-1, -1, -1] matches CASA/tab-sim."
+        ),
+    )
+    source_block_size: WholePositiveInt = Field(
+        default=128,
+        description="Number of discrete sky sources accumulated per scan block.",
+    )
+
+    @field_validator("uvw_sign", mode="before")
+    @classmethod
+    def _validate_uvw_sign(cls, value: Any) -> Tuple[int, int, int]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError(
+                "uvw_sign must be a sequence of three values, each +1 or -1, "
+                f"e.g. [-1, -1, -1], got {value!r}."
+            )
+        out = []
+        for s in value:
+            if isinstance(s, bool) or not isinstance(s, (int, float)) or abs(s) != 1:
+                raise ValueError(
+                    "uvw_sign must be a sequence of three values, each +1 or -1, "
+                    f"e.g. [-1, -1, -1], got {value!r}."
+                )
+            out.append(int(s))
+        return (out[0], out[1], out[2])
+
+
+#: The least ``GPVisAst.time_pad_factor: auto`` resolves to. The fringe rate only
 #: ever asks for more padding; this is what keeps the ends of the observation
 #: clear of the wrap-around of a periodic model when every baseline is fast
 #: enough to need none, and it is the default factor, so ``auto`` never pads
 #: less than an unconfigured run does.
 _AUTO_TIME_PAD_FLOOR = 2.0
-
-#: The ``ast.transform`` options. ``dft`` is the default: it holds less than the
-#: padded grid at every size but the smallest, and with ``corr_freq`` set it is
-#: faster too. ``fft`` is the lever back for ``corr_freq: null`` on a wide band,
-#: where every delay mode survives and the matrices grow with the channels squared.
-_TRANSFORMS = ("dft", "fft")
 
 
 def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
@@ -75,7 +158,7 @@ def time_pad_for_fringe_rate(n_time, int_time, fringe_rate):
 
 #: The power spectrum is used for its shape alone -- which modes survive
 #: ``cutoff``, and their relative weight -- and the amplitude is applied by
-#: normalising the mode standard deviations to ``std``. This is the ``p0`` the
+#: normalising the mode standard deviations to ``std_jy``. This is the ``p0`` the
 #: shape is evaluated with; any positive value gives the same shape and the
 #: same surviving modes, so it is 1.
 _SHAPE_ONLY = 1.0
@@ -84,14 +167,14 @@ _SHAPE_ONLY = 1.0
 #: real and an imaginary standard normal, so the complex latent carries twice
 #: the variance of the unit circularly-symmetric one and the signal comes out
 #: ``sqrt(2)`` wider than the mode variances alone. Dividing it out is what
-#: makes ``std`` the width of the visibility rather than of its real part.
+#: makes ``std_jy`` the width of the visibility rather than of its real part.
 #:
 #: ``math``, not ``jnp``: this module is imported before ``set_precision`` runs,
 #: so a jax scalar here would be built in float32 and a double run would carry a
 #: float32 sqrt(2) into its prior.
 _LATENT_WIDTH = sqrt(2.0)
 
-#: ``corr_freq: null`` is no roll-off along the frequency axis:
+#: ``corr_freq_hz: null`` is no roll-off along the frequency axis:
 #: :func:`~tabascal.fft_gp.knee_from_corr_scale` returns an infinite knee and
 #: the power spectrum is flat there.
 #:
@@ -102,7 +185,9 @@ _LATENT_WIDTH = sqrt(2.0)
 
 class GPVisAst(Component):
 
-    #: The tag ``ast.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    Config = GPVisAstConfig
+
+    #: The tag ``init: sample`` folds into ``seed`` (tabascal.seeds).
     seed_tag = "ast"
 
     # Accumulates into vis_ast, which Model zeroes before the components run.
@@ -122,6 +207,7 @@ class GPVisAst(Component):
     def setup(self, config):
         """All validation and error-prone operations here"""
         try:
+            cfg = self.config
             # Store only what's needed for forward computation
             self.n_time = config.n_time
             self.n_bl = config.n_bl
@@ -133,94 +219,45 @@ class GPVisAst(Component):
             self.dec = config.phase_centre["dec"]
             self.freqs = config.freqs
             self.times = config.times
-            self.seed = config_seed(config.args)
+            run_cfg = getattr(config, "config", None)
+            if hasattr(config, "seed"):
+                self.seed = config.seed
+            elif run_cfg is not None:
+                self.seed = run_cfg.seed
+            else:
+                self.seed = DEFAULT_SEED
 
-            # Checked rather than indexed: these went straight to the Fourier
-            # machinery, so a negative gamma, a string, or a cutoff of 1 -- which
-            # cuts every mode -- surfaced from inside fft_gp with a message about
-            # array shapes, if it surfaced at all. The same validator serves the
-            # RFI prior; the sections differ only in which keys are live.
-            gp_cov = validate_gp_cov(
-                config.args["ast"].get("gp_cov"),
-                "ast",
-                _GP_COV_RULES,
-                optional=_GP_COV_OPTIONAL,
-            )
-            config.args["ast"]["gp_cov"] = gp_cov
-
-            self.std = gp_cov["std"]
+            self.std = cfg.std_jy
             if self.std == FROM_DATA:
                 self.std = self._std_from_data(
                     config.vis_obs, config.estimator_flags
                 )
-            self.gammas = gp_cov["gammas"]
-            self.fov_deg = gp_cov["fov_deg"]
-
-            # Outside the covariance block: it sets how many modes are fitted,
+            self.gammas = list(cfg.gammas)
+            self.fov_deg = cfg.fov_deg
+            # Outside the covariance proper: it sets how many modes are fitted,
             # not what the prior believes, and since the spectrum is normalised
             # after the cut it does not change the width either.
-            self.pk_cutoff = validate_cutoff(
-                config.args["ast"].get("cutoff"), "ast.cutoff", _DEFAULT_PK_CUTOFF
-            )
-            config.args["ast"]["cutoff"] = self.pk_cutoff
+            self.pk_cutoff = cfg.cutoff
 
             # corr_freq is the bandwidth over which the sky stays correlated;
             # the knee is the delay conjugate to it. Shared with the RFI prior
-            # so the two sections cannot drift; null is no roll-off.
-            self.corr_freq = gp_cov["corr_freq"]
+            # (FourierGPConfig) so the two cannot drift; null is no roll-off.
+            self.corr_freq = cfg.corr_freq_hz
             # float(), so the knee is one type whether or not corr_freq was set
             # and is computed at host precision: the helper returns a jax scalar
             # for a value and a Python float for None, and under x32 the former
             # would carry the reciprocal in float32 for no reason.
             self.k0_freq = float(knee_from_corr_scale(self.corr_freq))
 
-            self.freq_pad_factor = config.args["ast"]["freq_pad_factor"]
-            self.time_pad_factor = config.args["ast"]["time_pad_factor"]
+            self.freq_pad_factor = cfg.freq_pad_factor
             # 'auto' is resolved from the fringe rates in _compute_gp_params.
-            tpf = self.time_pad_factor
-            if tpf != "auto" and (
-                isinstance(tpf, bool)
-                or not isinstance(tpf, (int, float))
-                or not isfinite(tpf)
-                or tpf < 1
-            ):
-                raise ValueError(
-                    "ast.time_pad_factor is a number of at least 1, or 'auto' "
-                    "to size it from the slowest baseline's fringe rate, got "
-                    f"{tpf!r}."
-                )
-
+            self.time_pad_factor = cfg.time_pad_factor
             # null is a setting, not a missing value: every baseline in one
-            # step, which is the padded transform at full width. int() alone
-            # would turn 1.9 into 1 without a word, and the finiteness test
-            # comes before it because yaml spells .inf and .nan, on which int()
-            # raises with a message about floats rather than about the key.
-            block_size = config.args["ast"].get("baseline_block_size", "auto")
-            if block_size not in ("auto", None) and (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or not isfinite(block_size)
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "ast.baseline_block_size is the number of baselines "
-                    "transformed per scan step: a whole number of at least 1, "
-                    "'auto' to size it from the padded grid, or null for a "
-                    f"single block over every baseline, got {block_size!r}."
-                )
-            self.baseline_block_size_setting = block_size
-
+            # step, which is the padded transform at full width.
+            self.baseline_block_size_setting = cfg.baseline_block_size
             # How the surviving modes become visibilities: see
             # build_block_signal. Both give the same values to round-off.
-            transform = config.args["ast"].get("transform", "dft")
-            if transform not in _TRANSFORMS:
-                raise ValueError(
-                    "ast.transform is how the latent modes become visibilities: "
-                    "'dft', a matrix per axis with no padded grid, or 'fft', "
-                    f"the padded grid's inverse FFT and a crop, got {transform!r}."
-                )
-            self.transform = transform
+            self.transform = cfg.transform
 
             self.xs = [self.freqs, self.times]
             self.pad_factors = [self.freq_pad_factor, self.time_pad_factor]
@@ -228,17 +265,16 @@ class GPVisAst(Component):
 
             # Do expensive setup operations once
             self._compute_gp_params()
-            # The number 'auto' came to, so the run's saved config says it.
-            config.args["ast"]["time_pad_factor"] = self.time_pad_factor
             self._resolve_baseline_block_size()
-            self._compute_prior_params(config.args["ast"]["mean"], config.vis_obs)
+            self._compute_prior_params(cfg.mean, config.vis_obs)
 
-            if config.args["plots"]["truth"] or config.args["ast"]["init"] == "truth":
-                self._compute_true_params(
-                    config.args["data"]["zarr_path"], config.args["data"]["data_col"]
-                )
+            plots_truth = bool(getattr(getattr(run_cfg, "plots", None), "truth", False))
+            if plots_truth or cfg.init == "truth":
+                truth_zarr = getattr(getattr(run_cfg, "data", None), "truth_zarr", None)
+                data_col = getattr(getattr(run_cfg, "data", None), "data_col", "DATA")
+                self._compute_true_params(truth_zarr, data_col)
 
-            self._compute_init_params(config.args["ast"]["init"], config.vis_obs)
+            self._compute_init_params(cfg.init, config.vis_obs)
             self._set_outputs()
 
             # Validate dimensions
@@ -246,6 +282,15 @@ class GPVisAst(Component):
 
         except Exception as e:
             raise RuntimeError(f"GPVisAst setup failed: {e}")
+
+    def resolved_options(self) -> dict[str, Any]:
+        """Record the concrete ``time_pad_factor`` resolved from ``'auto'``."""
+        if (
+            self.config.time_pad_factor == "auto"
+            and getattr(self, "time_pad_factor", None) not in (None, "auto")
+        ):
+            return {"time_pad_factor": float(self.time_pad_factor)}
+        return {}
 
     #: How much of a padded Fourier grid one scan step may build, in bytes. The
     #: block is sized from this under ``baseline_block_size: auto``. Three arrays
@@ -264,7 +309,7 @@ class GPVisAst(Component):
         """What one baseline costs the transform at its peak, in bytes.
 
         The padded Fourier grid: the pad, the shift and the inverse transform
-        are each of that size. Only ``ast.transform: fft`` builds it.
+        are each of that size. Only ``GPVisAst.transform: fft`` builds it.
         """
         padded = 1
         for dim, (lo, hi) in zip((self.n_k_freq_ast, self.n_k_time_ast), self.pads):
@@ -275,7 +320,7 @@ class GPVisAst(Component):
     def _resolve_baseline_block_size(self):
         """Turn the ``baseline_block_size`` setting into a block, or ``None``.
 
-        Under ``ast.transform: dft``, ``auto`` is a single step over every
+        Under ``GPVisAst.transform: dft``, ``auto`` is a single step over every
         baseline. The block exists to bound the padded Fourier grid, and that
         transform builds none: its only transient is the intermediate of the
         two matrix products, which is the modes in one axis and the
@@ -327,8 +372,8 @@ class GPVisAst(Component):
     def build_forward(self):
         """Return pure, JIT-compatible function
 
-        The baseline axis is walked in blocks of ``ast.baseline_block_size``
-        rather than vmapped whole. Under ``ast.transform: fft``, ``latent_to_signal`` pads the latent block up
+        The baseline axis is walked in blocks of ``GPVisAst.baseline_block_size``
+        rather than vmapped whole. Under ``GPVisAst.transform: fft``, ``latent_to_signal`` pads the latent block up
         to the padded k-grid, shifts, inverse-transforms and crops back, so a
         vmap over every baseline holds ``(n_bl, n_freq_pad, n_time_pad)`` three
         times over -- at the default padding each axis is about twice the data
@@ -352,7 +397,7 @@ class GPVisAst(Component):
         and is deliberately not here: the scan lowers the value-and-gradient
         peak on its own, and adding the split raises it again, because the gather
         the visibilities need on the way out makes the backward pass scatter a
-        cotangent the forward has just collected. ``ast.transform: dft`` removes
+        cotangent the forward has just collected. ``GPVisAst.transform: dft`` removes
         the padded grid altogether: see :meth:`build_block_signal`.
         """
         prefix = self.prefix
@@ -420,23 +465,23 @@ class GPVisAst(Component):
     def build_block_signal(self):
         """The latent-to-signal transform of one block of baselines.
 
-        :func:`~tabascal.fft_gp.latent_to_signal` (``ast.transform: fft``) pads
+        :func:`~tabascal.fft_gp.latent_to_signal` (``GPVisAst.transform: fft``) pads
         the modes back up to the padded grid, inverse-transforms the whole of it
         and crops -- at the default padding, about four times the elements of
         the visibilities formed and thrown away, per block, in the forward pass
         and again in reverse. The chain is linear and separable, so the same
         values come out of one small matrix per axis
-        (:func:`~tabascal.fft_gp.latent_to_signal_dft`, ``ast.transform:
+        (:func:`~tabascal.fft_gp.latent_to_signal_dft`, ``GPVisAst.transform:
         dft``), and the largest thing formed is the size of the visibilities.
         The matrices are fixed at setup and shared by every baseline.
 
         What the matrices cost is the surviving modes times the data length on
         each axis, where the FFT pays for the whole padded grid. The sky is
-        smooth in frequency, so with ``corr_freq`` set to a bandwidth near the
+        smooth in frequency, so with ``corr_freq_hz`` set to a bandwidth near the
         observed one only a few delay modes survive and the DFT is the faster
         of the two at every band width.
 
-        ``corr_freq: null`` is the exception: no roll-off keeps every delay
+        ``corr_freq_hz: null`` is the exception: no roll-off keeps every delay
         mode, the frequency matrix becomes square in the channel count, and on
         a wide band the FFT is the faster.
         """
@@ -454,7 +499,7 @@ class GPVisAst(Component):
         return lambda Y_block: transform(Y_block, pads, ss_idxs)
 
     def _compute_dft_mats(self, ns, dxs):
-        """The matrices of ``ast.transform: dft``.
+        """The matrices of ``GPVisAst.transform: dft``.
 
         The same modes and the same spectrum as the padded grid's -- checked
         here against its own pads and crop -- with the transform as matrices.
@@ -513,13 +558,13 @@ class GPVisAst(Component):
         if self.time_pad_factor < needed:
             print(
                 "  The slowest baselines' sky is held all but constant in time at this "
-                f"padding: set ast.time_pad_factor to {recommended:.4g} or "
-                "'auto' to resolve it (cheap with ast.transform: dft)."
+                f"padding: set GPVisAst.time_pad_factor to {recommended:.4g} or "
+                "'auto' to resolve it (cheap with GPVisAst.transform: dft)."
             )
 
     def _compute_gp_params(self):
 
-        if self.fov_deg:
+        if self.fov_deg != "primary_beam":
             # fov_deg is the full field of view (diameter) out to the first null;
             # the effective diameter makes the beam radius in
             # max_ast_fringe_rate equal to fov_deg / 2.
@@ -583,7 +628,7 @@ class GPVisAst(Component):
             self._compute_dft_mats(ns, dxs)
 
         def sigma(k0, std):
-            """Mode standard deviations that make ``std`` the width of vis_ast.
+            """Mode standard deviations that make ``std_jy`` the width of vis_ast.
 
             The modes are independent, so the variance of the signal they build
             is the sum of theirs. Dividing the shape by its own sum makes that
@@ -593,21 +638,21 @@ class GPVisAst(Component):
             ``E|z|^2 = 2`` rather than 1, and the visibility comes out
             ``sqrt(2)`` wider than the mode variances alone would say.
 
-            With it, ``std`` is the width of the *complex* visibility about
+            With it, ``std_jy`` is the width of the *complex* visibility about
             its prior mean, ``sqrt(E|vis_ast - mu|^2)``. At the default
-            ``ast.mean: 0`` the mean is zero and that is exactly
+            ``GPVisAst.mean: zeros`` the mean is zero and that is exactly
             ``rms|vis_ast|``, so "set it to the amplitude you see in a clean
             channel" is literally true rather than true after dividing by
             ``sqrt(2)``. That is the property the key exists to have. Under
-            ``ast.mean: data`` the prior is centred on the observed
-            visibilities and ``std`` is the scatter allowed around them, not
+            ``GPVisAst.mean: data`` the prior is centred on the observed
+            visibilities and ``std_jy`` is the scatter allowed around them, not
             the total amplitude -- ``rms|vis_ast|`` is then
             ``sqrt(std^2 + |mu|^2)``.
 
-            ``rfi.gp_cov.std`` names the same quantity in the same units, at
-            ``rfi.mean: 0``. It gets there differently, since it normalises
+            ``rfi_signal.std_jy`` names the same quantity in the same units, at
+            ``rfi_signal.mean: zeros``. It gets there differently, since it normalises
             ``rfi_A``, which the visibility is quadratic in -- and a non-zero
-            ``rfi.mean`` adds power to the RFI visibility rather than merely
+            ``rfi_signal.mean`` adds power to the RFI visibility rather than merely
             shifting it, so the two stop matching there.
 
             Dividing by the sum rather than by the mode count is what makes
@@ -632,7 +677,7 @@ class GPVisAst(Component):
 
         self.sigma_ast_k = vmap(sigma, (0, 0), 0)(self.k0_time, std_bl)
 
-        # validate_gp_cov accepts any finite positive float, but sigma is
+        # The config accepts any finite positive std, but sigma is
         # built in the run's own precision: std = 1e-50 flushes it to zero in
         # float32 and std = 1e40 overflows it, and either way the first thing
         # that divides by sigma -- inv_transform, encoding the initial sky --
@@ -647,7 +692,7 @@ class GPVisAst(Component):
                 else f"{float(jnp.min(self.std)):.4g}..{float(jnp.max(self.std)):.4g}"
             )
             raise ValueError(
-                f"ast.gp_cov.std ({reported}) is not representable in this "
+                f"GPVisAst.std_jy ({reported}) is not representable in this "
                 f"run's precision: the mode standard deviations it gives come "
                 f"out {'non-finite' if not jnp.all(jnp.isfinite(self.sigma_ast_k)) else 'zero'}. "
                 f"std is a visibility amplitude in Jy, so it should be within "
@@ -677,7 +722,7 @@ class GPVisAst(Component):
                 (self.n_bl, self.n_k_freq_ast, self.n_k_time_ast), dtype=complex
             )
         else:
-            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros, 0).")
+            raise ValueError(f"Provided prior type: {prior_type} is not valid. Choose from (data, zeros).")
 
     def _set_outputs(self):
 
@@ -688,20 +733,20 @@ class GPVisAst(Component):
     def _std_from_data(self, vis_obs, estimator_flags):
         """``rms|V|`` per baseline over the samples nothing has flagged.
 
-        ``std`` is defined as that quantity, so this is not a proxy for the
+        ``std_jy`` is defined as that quantity, so this is not a proxy for the
         prior width -- it is the prior width, read off the data instead of
         guessed. Per baseline because that is what the data offers; the model
         then has one width per baseline rather than one for all of them.
 
         The measurement is :func:`tabascal.fft_gp.rms_vis`, shared with
-        ``rfi.gp_cov.std: data``. What is here is the policy: which samples this
+        ``rfi_signal.std_jy: data``. What is here is the policy: which samples this
         prior wants, and what to say when the mask cannot give them.
 
         The mask is ``estimator_flags`` -- everything known to be bad, the
         MS's own flags and the samples no gain table could calibrate -- and
         not the likelihood's. Those answer different questions and this is
         where the difference shows: a strong emitter flagged by some other
-        task is data tabascal is here to recover, so ``data.flags: false``
+        task is data tabascal is here to recover, so ``data.exclude_flagged: false``
         keeps it in the fit, and it is still the wrong place to measure a
         clean sky amplitude from. An uncalibratable visibility is worse: it
         carries a unity gain where its neighbours were divided by a real one,
@@ -721,27 +766,27 @@ class GPVisAst(Component):
 
         if not bool(jnp.any(keep)):
             raise ValueError(
-                "ast.gp_cov.std: data has nothing to measure -- every "
+                "GPVisAst.std_jy: data has nothing to measure -- every "
                 "visibility is flagged. Set a width in Jy instead."
             )
         if not bool(jnp.any(~keep)):
             print(
-                "Warning: ast.gp_cov.std: data is measuring every "
+                "Warning: GPVisAst.std_jy: data is measuring every "
                 "visibility, because nothing flags any of them. Whatever "
                 "RFI is in them is in the prior width too, so it will be "
                 "wider than the sky by however much RFI there is. Flag the "
                 "contaminated samples in the MS -- this reads those flags "
-                "whatever data.flags says, so flagging them does not stop "
-                "tabascal fitting them -- or set ast.gp_cov.std to a width "
+                "whatever data.exclude_flagged says, so flagging them does not stop "
+                "tabascal fitting them -- or set GPVisAst.std_jy to a width "
                 "in Jy."
             )
 
-        # The measurement itself is rfi.gp_cov.std: data's as well; only the mask and
+        # The measurement itself is rfi_signal.std_jy: data's as well; only the mask and
         # the reduction differ. See fft_gp.rms_vis.
-        std = rms_vis(vis_obs, keep, "ast.gp_cov.std", per_baseline=True)
+        std = rms_vis(vis_obs, keep, "GPVisAst.std_jy", per_baseline=True)
 
         print(
-            f"Using ast.gp_cov.std from data: {float(jnp.min(std)):.4g} to "
+            f"Using GPVisAst.std_jy from data: {float(jnp.min(std)):.4g} to "
             f"{float(jnp.max(std)):.4g} Jy across baselines "
             f"(median {float(jnp.median(std)):.4g})"
         )
@@ -870,7 +915,7 @@ class DiscreteSkyVis(Component):
 
     Reads ``ast_radec`` (n_src, 2) radians, ``ast_I`` (n_src, n_freq) Jy and
     ``ast_shape`` (n_src, 3) radians from the state — see
-    :class:`~tabascal.components.ast_signal.FixedDiscreteSky`, which must be listed
+    :class:`~tabascal.components.ast_signal.FixedDiscreteSky`, which therefore runs
     before this component — and ACCUMULATES into ``vis_ast`` using the visibility
     equation
 
@@ -885,7 +930,7 @@ class DiscreteSkyVis(Component):
     ``B = S delta_Omega`` and ``delta_Omega = n delta(l) delta(m)``, so the Jacobian
     cancels and a source contributes its catalogue flux exactly, in every direction.
     ``(u, v, w)`` is the ANTENNA2 - ANTENNA1 baseline the equation above is written for,
-    which is ``ast.uvw_sign`` times the UVW column. Which baseline that column holds is a
+    which is ``DiscreteSkyVis.uvw_sign`` times the UVW column. Which baseline that column holds is a
     property of whatever wrote the data, so the sign is a config key; the default,
     ``(-1, -1, -1)``, is the convention tab-sim writes — see ``setup``.
 
@@ -908,7 +953,7 @@ class DiscreteSkyVis(Component):
     both listed, ``vis_ast`` is the GP plus the fixed sources. ``Model`` zeroes
     ``vis_ast`` before the forward chain runs, so the two may be listed in either order.
 
-    The source axis is walked in blocks of ``ast.source_block_size`` with
+    The source axis is walked in blocks of ``DiscreteSkyVis.source_block_size`` with
     :func:`jax.lax.scan`, and the block body is rematerialised: the delay array is
     (n_bl, n_time, n_src), which for a real catalogue is the largest array in the model,
     and blocking replaces ``n_src`` in that shape with the block size at the cost of
@@ -924,6 +969,8 @@ class DiscreteSkyVis(Component):
     A fixed sky exists to make a per-antenna gain identifiable (see issue #124); the flux
     scale it fixes the gain against is only physical if the data are calibrated to Jy.
     """
+
+    Config = DiscreteSkyVisConfig
 
     required_inputs = {
         "ast_radec": ("n_src", 2),
@@ -947,8 +994,7 @@ class DiscreteSkyVis(Component):
             self.freqs = jnp.asarray(config.freqs)
             self.phase_centre_ra = jnp.deg2rad(config.phase_centre["ra"])
             self.phase_centre_dec = jnp.deg2rad(config.phase_centre["dec"])
-            # Per-axis uvw sign toggles (u, v, w), applied before the exponent below,
-            # from ast.uvw_sign.
+            # Per-axis uvw sign toggles (u, v, w), applied before the exponent below.
             #
             # The measurement equation's exp(-2i pi b.(s - s0) / lambda) is written for
             # b = ANTENNA2 - ANTENNA1, and which of the two baselines a UVW column
@@ -961,33 +1007,8 @@ class DiscreteSkyVis(Component):
             # to -- but an MS from another toolchain may well carry the opposite
             # convention, and a wrong sign is a sky mirrored through the phase centre,
             # exactly the corruption a gain solved against a fixed sky would absorb.
-            sign = config.args["ast"].get("uvw_sign", (-1, -1, -1))
-            entries = sign if isinstance(sign, (list, tuple)) else ()
-            if len(entries) != 3 or not all(
-                not isinstance(s, bool) and isinstance(s, (int, float)) and abs(s) == 1
-                for s in entries
-            ):
-                raise ValueError(
-                    "ast.uvw_sign is the sign applied to each of the u, v and w axes "
-                    "of the UVW column: a sequence of three values, each exactly "
-                    f"+1 or -1, e.g. [-1, -1, -1], got {sign!r}."
-                )
-            self.uvw_sign = jnp.asarray([float(s) for s in entries])
-
-            # int() alone would turn 1.9 into 1 without a word, which is a hundredfold
-            # slowdown dressed up as a valid setting.
-            block_size = config.args["ast"].get("source_block_size", 128)
-            if (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "ast.source_block_size is the number of sources handled per scan "
-                    f"step: a whole number of at least 1, got {block_size!r}."
-                )
-            self.source_block_size = int(block_size)
+            self.uvw_sign = jnp.asarray([float(s) for s in self.config.uvw_sign])
+            self.source_block_size = int(self.config.source_block_size)
 
             self._set_outputs()
         except Exception as e:

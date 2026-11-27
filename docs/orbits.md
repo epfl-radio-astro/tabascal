@@ -293,7 +293,7 @@ For a TLE the line-1 epoch field is rewritten and the modulo-10 checksum
 recomputed; for an OMM the `EPOCH` field is moved. Nothing else on either record
 changes — same satellite, same elements, read at another instant.
 
-A run consumes the directory like any other: point `satellites.extra_orbit_dir`
+A run consumes the directory like any other: point `extra_orbit_dir` on the trajectory component
 at it (or pass `--extra-orbit-dir`), and each shifted record wins outright for
 its own NORAD id, ahead of the managed cache and SatChecker, under the default
 unlimited `extra_orbit_max_age_days`. The run log's per-satellite provenance line
@@ -302,7 +302,7 @@ actually propagated, so what was modelled can be read back afterwards.
 
 `tabascal search` writes the same records for every satellite it detects, into
 `<stem>_shifted_tles/` unless `--write-shifted-tle DIR` says otherwise, and the
-`satellites` config fragment it emits beside them already points
+`trajectory.FixedOrbit` component snippet it emits beside them already points
 `extra_orbit_dir` at that directory with `extra_orbit_max_age_days: null`.
 Merging the fragment into a config is then all a run needs to model the
 trajectories the search measured — see

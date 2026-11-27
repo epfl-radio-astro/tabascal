@@ -1,9 +1,8 @@
 """``opt.optimizer``, ``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` (GitHub #82).
 
-- **The old path is unchanged.** With ``optimizer`` and ``schedule`` both null,
-  ``dual_run`` still runs two ``adabelief`` phases, bit for bit.
-- **One compilation.** A schedule builds one optimiser, and ``dual_run``'s second
-  phase only resets its step size, so either way the step is traced once.
+- **Default path.** With ``optimizer`` and ``schedule`` both null, the fit runs
+  one ``adabelief`` at constant ``epsilon``, bit for bit.
+- **One compilation.** One optimiser for the whole fit traces the step once.
 - **The step sizes are the ones asked for**, and the optimiser asked for takes them.
 - **Checkpoints are written at their steps and reload** to the parameters the
   optimiser held then.
@@ -51,7 +50,6 @@ def _by_hand(toy, phases):
 
 
 def _svi(toy, max_iter, **kwargs):
-    kwargs.setdefault("dual_run", False)
     kwargs.setdefault("epsilon", EPS)
     return run_custom_svi(
         prob_model=toy.prob_model,
@@ -83,26 +81,25 @@ def _counting(toy):
 
 
 # ---------------------------------------------------------------------------
-# The old path
+# Default (unscheduled) path
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("eps", [EPS, 1])  # an integer epsilon still drops to 0.1
-def test_with_no_schedule_dual_run_is_the_two_phases_it_always_was(eps):
+@pytest.mark.parametrize("eps", [EPS, 1])
+def test_with_no_schedule_runs_constant_adabelief(eps):
     toy = _toy_problem(0.1)
-    ref_losses, history = _by_hand(toy, [(optax.adabelief(eps), 3), (optax.adabelief(eps / 10), 3)])
+    ref_losses, history = _by_hand(toy, [(optax.adabelief(float(eps)), 6)])
 
-    results = _svi(toy, 3, dual_run=True, epsilon=eps)
+    results = _svi(toy, 6, epsilon=eps)
 
     assert list(np.asarray(results.losses)) == ref_losses
     _same(results.params, history[-1])
 
 
-def test_dual_run_traces_the_step_once():
-    """The second phase's step size is optimiser state, not a new static argument."""
+def test_unscheduled_run_traces_the_step_once():
     toy = _toy_problem(0.1)
     calls = _counting(toy)
-    _svi(toy, 3, dual_run=True)
+    _svi(toy, 6)
     assert calls["n"] == 1
 
 
@@ -111,7 +108,7 @@ def test_dual_run_traces_the_step_once():
 # ---------------------------------------------------------------------------
 
 
-def test_a_step_schedule_holds_epsilon_for_n_steps_then_drops_as_dual_run_does():
+def test_a_step_schedule_holds_epsilon_for_n_steps_then_drops():
     schedule = step_size(validate_schedule({"kind": "step", "boundaries": [4]}, 8), EPS, 8)
     sizes = [float(schedule(count)) for count in range(8)]
     np.testing.assert_allclose(sizes, [EPS] * 4 + [EPS / 10] * 4, rtol=1e-6)
@@ -162,22 +159,22 @@ def test_the_other_schedules_give_their_step_sizes(schedule, max_iter, expected)
     )
 
 
-@pytest.mark.parametrize("dual_run", [False, True], ids=["schedule", "dual_run"])
-def test_the_run_takes_the_optimiser_asked_for(dual_run):
-    """Its arguments and the clip included, in each phase of dual_run, bit for bit."""
+@pytest.mark.parametrize("with_schedule", [False, True], ids=["constant", "schedule"])
+def test_the_run_takes_the_optimiser_asked_for(with_schedule):
+    """Its arguments and the clip included, with or without a schedule, bit for bit."""
     toy = _toy_problem(0.1)
     optimizer = validate_optimizer({"name": "adamw", "b1": 0.8, "weight_decay": 1e-3, "clip_norm": 0.5})
 
     def adamw(lr):
         return optax.chain(optax.clip_by_global_norm(0.5), optax.adamw(lr, b1=0.8, weight_decay=1e-3))
 
-    if dual_run:
-        ref_losses, history = _by_hand(toy, [(adamw(EPS), 3), (adamw(EPS / 10), 3)])
-        results = _svi(toy, 3, dual_run=True, optimizer=optimizer)
-    else:
+    if with_schedule:
         schedule = validate_schedule({"kind": "cosine", "warmup_steps": 2}, 6)
         ref_losses, history = _by_hand(toy, [(adamw(step_size(schedule, EPS, 6)), 6)])
         results = _svi(toy, 6, schedule=schedule, optimizer=optimizer)
+    else:
+        ref_losses, history = _by_hand(toy, [(adamw(EPS), 6)])
+        results = _svi(toy, 6, optimizer=optimizer)
 
     assert list(np.asarray(results.losses)) == ref_losses
     _same(results.params, history[-1])
@@ -202,37 +199,26 @@ def test_a_schedule_traces_the_step_once():
     assert calls["n"] == 1
 
 
-def test_a_schedule_keeps_the_moments_across_the_drop():
-    """Unlike dual_run, which restarts them: the two diverge after the boundary only."""
-    toy = _toy_problem(0.1)
-    dual = np.asarray(_svi(toy, 3, dual_run=True).losses)
-    scheduled = np.asarray(
-        _svi(toy, 6, schedule=validate_schedule({"kind": "step", "boundaries": [3]}, 6)).losses
-    )
-    np.testing.assert_allclose(scheduled[:3], dual[:3], rtol=1e-6)
-    assert not np.allclose(scheduled[3:], dual[3:], rtol=1e-9, atol=0)
-
-
 # ---------------------------------------------------------------------------
 # Checkpoints
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("dual_run", [False, True], ids=["schedule", "dual_run"])
-def test_checkpoints_are_written_at_their_steps_and_reload(tmp_path, dual_run):
+@pytest.mark.parametrize("with_schedule", [False, True], ids=["constant", "schedule"])
+def test_checkpoints_are_written_at_their_steps_and_reload(tmp_path, with_schedule):
     toy = _toy_problem(0.1)
-    if dual_run:
-        kwargs = {"dual_run": True}
-        phases = [(optax.adabelief(EPS), 3), (optax.adabelief(EPS / 10), 3)]
-    else:
+    if with_schedule:
         schedule = validate_schedule({"kind": "step", "boundaries": [3]}, 6)
         kwargs = {"schedule": schedule}
         phases = [(optax.adabelief(step_size(schedule, EPS, 6)), 6)]
+    else:
+        kwargs = {}
+        phases = [(optax.adabelief(EPS), 6)]
     ref_losses, history = _by_hand(toy, phases)
 
-    steps = (2, 4, 6)  # 4 is in dual_run's second phase
+    steps = (2, 4, 6)
     results = _svi(
-        toy, 3 if dual_run else 6, checkpoints=steps,
+        toy, 6, checkpoints=steps,
         checkpoint_path=lambda step: checkpoint_path(str(tmp_path), "map_pred_Custom", step),
         **kwargs,
     )
@@ -277,7 +263,7 @@ def test_a_failed_checkpoint_write_raises_in_a_single_process_run(tmp_path):
 def test_no_checkpoint_is_written_by_default(monkeypatch):
     calls = []
     monkeypatch.setattr(tab_tools, "save_checkpoint", lambda *a, **k: calls.append(a))
-    _svi(_toy_problem(0.1), 3, dual_run=True)
+    _svi(_toy_problem(0.1), 3)
     assert calls == []
 
 
@@ -324,10 +310,10 @@ def test_the_stop_waits_for_min_steps():
     assert len(_svi(toy, 100, schedule=schedule, stop=stop).losses) == 30
 
 
-def test_a_stop_without_a_schedule_is_refused():
+def test_the_stop_works_without_an_explicit_schedule():
     toy = _toy_problem(0.1)
-    with pytest.raises(ValueError, match="schedule"):
-        _svi(toy, 3, stop={"window": 2, "rtol": 0.1, "min_steps": 0})
+    stop = {"window": 2, "rtol": 1.0, "min_steps": 10}
+    assert len(_svi(toy, 100, stop=stop).losses) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +322,7 @@ def test_a_stop_without_a_schedule_is_refused():
 
 
 def opt(**kwargs):
-    return {"epsilon": 0.2, "max_iter": 1000, "dual_run": True, **kwargs}
+    return {"epsilon": 0.2, "max_iter": 1000, **kwargs}
 
 
 def test_off_by_default():
@@ -390,14 +376,13 @@ def test_the_defaults_fill_in():
         ({"optimizer": {"name": "adam", "eps": 1e-400}}, "eps"),  # 0 once parsed
         ({"optimizer": {"name": "rmsprop", "centered": True, "bias_correction": True}}, "centered"),
         ({"optimizer": {"clip_norm": 0}}, "clip_norm"),
-        ({"stop": {"window": 10, "rtol": 1e-4}}, "needs opt.schedule"),
-        ({"schedule": {"kind": "constant"}, "stop": {"window": 0, "rtol": 1e-4}}, "window"),
-        ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": True}}, "rtol"),
-        ({"schedule": {"kind": "constant"}, "stop": {"window": 10}}, "rtol"),
+        ({"stop": {"window": 0, "rtol": 1e-4}}, "window"),
+        ({"stop": {"window": 10, "rtol": True}}, "rtol"),
+        ({"stop": {"window": 10}}, "rtol"),
         ({"checkpoints": [0]}, "checkpoints"),
         ({"checkpoints": [1.5]}, "checkpoints"),
         ({"checkpoints": 1000}, "checkpoints"),
-        ({"checkpoints": [2001]}, "2001"),  # dual_run runs 2 * max_iter
+        ({"checkpoints": [1001]}, "1001"),
         ({"schedule": {"kind": "constant"}, "checkpoints": [1001]}, "1001"),
     ],
 )
@@ -436,29 +421,26 @@ def test_single_precision_checks_the_value_it_will_hold(optimizer, monkeypatch):
         validate_optimizer(optimizer)
 
 
-def test_dual_run_checkpoints_may_reach_into_the_second_phase():
-    assert validate_opt(opt(checkpoints=[2000, 1000]))["checkpoints"] == [1000, 2000]
+def test_checkpoints_are_sorted_and_deduplicated():
+    assert validate_opt(opt(checkpoints=[1000, 500]))["checkpoints"] == [500, 1000]
 
 
-def test_the_base_config_ships_every_new_key_off():
-    from importlib.resources import files
+def test_the_schema_default_ships_every_new_key_off():
+    from tabascal.schema import OptConfig
 
-    from tabascal.config import yaml_load
-
-    base = yaml_load(str(files("tabascal").joinpath("data/config/tab_config_base.yaml")))["opt"]
-    assert all(base[k] is None for k in ("optimizer", "schedule", "stop", "checkpoints"))
-    assert base["dual_run"] is True
+    cfg = OptConfig()
+    assert all(getattr(cfg, k) is None for k in ("optimizer", "schedule", "stop", "checkpoints"))
 
 
 @pytest.mark.parametrize(
     "kwargs, says",
     [
-        ({}, "(dual_run)"),
+        ({}, "adabelief, step size 0.2 for 1000 steps"),
         ({"schedule": {"kind": "step", "boundaries": [1000]}, "max_iter": 2000}, "one compiled step"),
-        ({"schedule": {"kind": "constant"}, "stop": {"window": 10, "rtol": 1e-4}}, "stop when"),
+        ({"stop": {"window": 10, "rtol": 1e-4}}, "stop when"),
         ({"checkpoints": [500]}, "saved at steps [500]"),
         ({"optimizer": {"name": "sgd", "momentum": 0.9, "clip_norm": 1}},
-         "sgd (momentum=0.9, gradient norm clipped at 1), step size 0.2 for 1000 steps, then a new sgd"),
+         "sgd (momentum=0.9, gradient norm clipped at 1), step size 0.2 for 1000 steps"),
         ({"schedule": {"kind": "linear", "warmup_steps": 10}},
          "warmup from x0 over 10 steps, then linear decay to x0"),
         ({"schedule": {"kind": "step", "boundaries": [200, 500], "factor": [0.5, 0.1]}}, "x0.5/0.1 at steps"),
@@ -473,11 +455,11 @@ def test_the_log_line_names_the_optimiser(kwargs, says):
 # ---------------------------------------------------------------------------
 
 E2E_COMPONENTS = [
-    "trajectory:FixedOrbitFine",
-    "rfi_signal:ComplexRFIVarAntFine",
-    "rfi_vis:RiemannVisFine",
-    "ast_vis:GPVisAst",
-    "gains:UnitaryGains",
+    "trajectory.FixedOrbitFine",
+    "rfi_signal.ComplexRFIVarAntFine",
+    "rfi_vis.RiemannVisFine",
+    "ast_vis.GPVisAst",
+    "gains.UnitaryGains",
 ]
 
 
@@ -506,21 +488,34 @@ def scheduled_fit(tmp_path_factory):
     script = Path(__file__).parent.parent / "tabascal" / "scripts" / "run_tabascal.py"
     precision = "double" if jax.config.read("jax_enable_x64") else "single"
 
+    def _with_prior_init(comps):
+        out = []
+        for entry in comps:
+            if isinstance(entry, dict):
+                ((ref, params),) = entry.items()
+                params = dict(params or {})
+                if ref.startswith(("rfi_signal.", "ast_vis.GPVisAst")):
+                    params["init"] = "prior"
+                out.append({ref: params})
+            else:
+                out.append(entry)
+        return out
+
     work = tmp_path_factory.mktemp("scheduled")
     out_dir = _copy_sim(data, work)
     config_path = work / "tab_target.yaml"
     read_and_modify_yaml(
         {
-            "model": {"components": E2E_COMPONENTS, "precision": precision},
-            "inference": {"opt": True},
+            "model": {
+                "components": _with_prior_init(base["model"]["components"]),
+                "precision": precision,
+            },
             "opt": {
-                "epsilon": 1e-3, "max_iter": 4, "dual_run": True, "guide": "map",
+                "epsilon": 1e-3, "max_iter": 4,
                 "optimizer": {"name": "adam", "clip_norm": 10.0},
                 "schedule": {"kind": "step", "boundaries": [2]},
                 "checkpoints": [2, 4],
             },
-            "ast": {**base["ast"], "init": "prior"},
-            "rfi": {**base["rfi"], "init": "prior"},
         },
         template,
         config_path,
@@ -554,7 +549,6 @@ def test_the_runner_writes_each_checkpoint_beside_the_map_prediction(scheduled_f
     ]
     assert ("Optimiser : adam (gradient norm clipped at 10), step size 0.001, x0.1 at steps [2], "
             "4 steps, one compiled step") in stdout
-    # dual_run: true is not read with a schedule: four steps, not eight.
     params, step, _ = load_checkpoint(str(results / "checkpoints" / f"{stem}_step4.npz"))
     assert step == 4 and params
     assert xr.open_zarr(str(map_zarr)).sizes  # the run finished its writes

@@ -17,8 +17,12 @@ from tabascal.interferometry import (
 )
 from tabascal.poly_interp import fine_offsets, fit_path
 from tabascal.components import Component, assert_attr_shape
+from tabascal.schema import PositiveInt, StrictInt, TrajectoryConfig
 from tabascal.timing import measure_runtime
 from tabascal.time import JulianDate, apparent_radec_of_date, gast_deg, secs_to_days, skyfield_time, timescale
+
+from typing import Literal, Optional, Union
+from pydantic import Field, model_validator
 
 import sgp4jax
 from sgp4jax import WGS72 as gravity
@@ -240,7 +244,54 @@ class PhaseCalculationRFIFine(Component):
         }
 
 
+class FixedOrbitConfig(TrajectoryConfig):
+    """Configuration for :class:`FixedOrbit` (data-grid analytic RFI route)."""
+
+    path_order: StrictInt = Field(
+        default=3,
+        ge=0,
+        le=3,
+        description=(
+            "Degree of the polynomial in time through each cell's geometric delay, "
+            "from 0 to 3: the analytic kernel keeps the delay's derivatives up to the third."
+        ),
+    )
+    path_nodes: Union[PositiveInt, Literal["auto"]] = Field(
+        default="auto",
+        description=(
+            "Samples per cell the path polynomial is fitted through: odd, and at least "
+            "path_order + 1. 'auto' uses 4 * path_order + 1."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_path_nodes(self) -> "FixedOrbitConfig":
+        # path_order stops at 3 because the kernel keeps the delay's derivatives
+        # up to the third, so a higher degree would be fitted and then silently
+        # dropped. The default node count oversamples the degree several times
+        # over, which keeps the fit close to the least-squares one over the whole
+        # cell rather than an interpolation through the fewest points that fix a
+        # polynomial. The count must be odd: the nodes are laid out as
+        # fine_offsets lays out a cell, with the centre at index n // 2, so an
+        # even count leaves one more node before the centre than after it, and
+        # the fit runs out before the cell's end.
+        if self.path_nodes != "auto":
+            if self.path_nodes < self.path_order + 1 or self.path_nodes % 2 == 0:
+                raise ValueError(
+                    "path_nodes is how many samples per cell the path polynomial is "
+                    f"fitted through: an odd whole number of at least path_order + 1 = "
+                    f"{self.path_order + 1}, got {self.path_nodes!r}."
+                )
+        return self
+
+    @property
+    def effective_path_nodes(self) -> int:
+        return 4 * self.path_order + 1 if self.path_nodes == "auto" else self.path_nodes
+
+
 class FixedOrbitFine(Component):
+
+    Config = TrajectoryConfig
 
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -366,10 +417,10 @@ class FixedOrbit(Component):
 
     - ``rfi_phase`` ``(n_rfi, n_ant, n_freq, n_time)``: the phase at the channel
       and cell centres, reduced to a turn.
-    - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, rfi.path_order + 1)``: the
+    - ``rfi_delay_poly_us`` ``(n_rfi, n_ant, n_time, FixedOrbit.path_order + 1)``: the
       geometric delay in microseconds relative to the array mean and its first
-      ``rfi.path_order`` time derivatives at each cell centre, from a
-      least-squares polynomial through ``rfi.path_nodes`` nodes spanning the cell
+      ``FixedOrbit.path_order`` time derivatives at each cell centre, from a
+      least-squares polynomial through ``FixedOrbit.path_nodes`` nodes spanning the cell
       (:func:`tabascal.poly_interp.fit_path`). Relative, because a term common
       to every antenna cancels in a baseline's phase difference, and what
       remains is small enough for float32 to carry across a cell -- the
@@ -383,7 +434,7 @@ class FixedOrbit(Component):
 
     The fine grid is never resolved, and nothing here reads its size. A
     degree-``path_order`` series about a cell's centre is settled by a handful of
-    samples spanning that cell, so the path is propagated at ``rfi.path_nodes``
+    samples spanning that cell, so the path is propagated at ``FixedOrbit.path_nodes``
     nodes per cell. The fine-grid count climbs steeply with the array's extent --
     37, 59, 174, 1065 and 6570 samples per cell at 64, 128, 256, 384 and 512
     SKA-Low stations -- and the range calculation it feeds is ``(n_rfi, n_ant,
@@ -391,6 +442,8 @@ class FixedOrbit(Component):
     coefficients per cell. ``rfi_xyz`` is therefore the source position at each
     cell centre rather than at each fine sample.
     """
+
+    Config = FixedOrbitConfig
 
     required_inputs = {}
     output_shapes = {
@@ -416,39 +469,8 @@ class FixedOrbit(Component):
             self.int_time = float(config.int_time)
             self.times_jd = JulianDate(config.times_jd)
 
-            # The kernel keeps the delay's derivatives up to the third, so a
-            # higher degree would be fitted and then silently dropped.
-            order = config.args["rfi"].get("path_order", 3)
-            if isinstance(order, bool) or not isinstance(order, int) or not 0 <= order <= 3:
-                raise ValueError(
-                    "rfi.path_order is the degree of the polynomial in time through "
-                    "each cell's path: a whole number from 0 to 3, the most the "
-                    f"analytic kernel integrates, got {order!r}."
-                )
-            self.path_order = order
-
-            # Nodes per cell for that fit. The default oversamples the degree
-            # several times over, which keeps the fit close to the least-squares
-            # one over the whole cell rather than an interpolation through the
-            # fewest points that fix a polynomial. The count must be odd: the
-            # nodes are laid out as fine_offsets lays out a cell, with the centre
-            # at index n // 2, so an even count leaves one more node before the
-            # centre than after it, and the fit runs out before the cell's end.
-            nodes = config.args["rfi"].get("path_nodes", None)
-            if nodes is None:  # the base config carries the key as null
-                nodes = 4 * order + 1
-            if (
-                isinstance(nodes, bool)
-                or not isinstance(nodes, int)
-                or nodes < order + 1
-                or nodes % 2 == 0
-            ):
-                raise ValueError(
-                    "rfi.path_nodes is how many samples per cell the path polynomial is "
-                    f"fitted through: an odd whole number of at least rfi.path_order + 1 = "
-                    f"{order + 1}, got {nodes!r}."
-                )
-            self.n_path_nodes = nodes
+            self.path_order = self.config.path_order
+            self.n_path_nodes = self.config.effective_path_nodes
 
             self._compute_rfi_path()
             self._set_outputs()
@@ -588,6 +610,7 @@ def _gcrf_positions_split(sats, whole, fraction):
 
 class NoDragOrbitFine(Component):
 
+    Config = TrajectoryConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -770,6 +793,7 @@ class NoDragOrbitFine(Component):
 
 class OrbitFine(Component):
 
+    Config = TrajectoryConfig
     requires_double = True
     required_inputs = {}  # No inputs needed
     output_shapes = {
@@ -1103,8 +1127,8 @@ def _require_tles(tles_df, norad_ids) -> None:
             f"TLEs could not be resolved for {len(missing)} of {len(requested)} "
             f"requested satellites: NORAD IDs {missing}. TABASCAL does not "
             f"subtract an incomplete satellite model: supply their TLEs via "
-            f"--extra-orbit-dir, relax satellites.remote_max_age_days "
-            f"deliberately, or remove these IDs from satellites.norad_ids."
+            f"--extra-orbit-dir, relax remote_max_age_days on the trajectory "
+            f"component deliberately, or remove these IDs from its norad_ids."
         )
 
 

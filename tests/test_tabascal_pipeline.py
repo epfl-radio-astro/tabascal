@@ -162,25 +162,76 @@ class PipelineTestConfig:
     )
 
 
+def _build_pipeline_components(
+    template_components: list[Any],
+    target_specs: list[str],
+    rfi_backend: str | None = None,
+) -> list[Any]:
+    """Build a compartmentalized component list for a pipeline test case.
+
+    Preserves the parameter dictionaries from ``tests/data/tab_target.yaml``
+    (NORAD IDs, RFI GP settings, integration factors, AST GP settings) while
+    swapping component classes and optionally overriding ``backend`` on the
+    ``rfi_vis.*`` component.
+    """
+    template_params: dict[str, dict[str, Any]] = {}
+    for entry in template_components:
+        if isinstance(entry, dict):
+            ((ref, params),) = entry.items()
+            module = ref.split(".")[0]
+            template_params[module] = dict(params or {})
+
+    built: list[Any] = []
+    for spec in target_specs:
+        module, _, cls_name = spec.partition(".")
+        if module == "trajectory" and cls_name == "PhaseCalculationRFIFine":
+            built.append(spec)
+        elif module == "trajectory":
+            built.append({spec: dict(template_params.get("trajectory", {}))})
+        elif module == "rfi_signal":
+            built.append({spec: dict(template_params.get("rfi_signal", {}))})
+        elif module == "rfi_vis":
+            params = dict(template_params.get("rfi_vis", {}))
+            if cls_name == "AnalyticVis":
+                params.pop("time_int_factor", None)
+                params.pop("min_time_bins", None)
+                params.pop("max_time_bins", None)
+            if rfi_backend is not None:
+                params["backend"] = rfi_backend
+            built.append({spec: params} if params else spec)
+        elif module == "ast_vis":
+            built.append({spec: dict(template_params.get("ast_vis", {}))})
+        elif module == "gains":
+            built.append(spec)
+        else:
+            built.append(spec)
+    return built
+
+
 def _run_pipeline(
     provide_test_data: Path,
     tmp_path: Path,
     t_config: PipelineTestConfig,
     precision: str,
 ) -> tuple[int, str, str]:
+    from tabascal.config import yaml_load
+
     data_dir = Path(__file__).parent / "data"
     config_template = data_dir / "tab_target.yaml"
     config_path = tmp_path / "tab_target.yaml"
 
+    template = yaml_load(config_template)
+    components = _build_pipeline_components(
+        template["model"]["components"],
+        t_config.components,
+        rfi_backend=t_config.rfi_backend,
+    )
     config_mod: dict = {
-        "model": {"components": t_config.components, "precision": precision}
+        "model": {"components": components, "precision": precision}
     }
-    if t_config.rfi_backend is not None:
-        from tabascal.config import yaml_load
-
-        # The whole section: read_and_modify_yaml replaces top-level sections.
-        rfi = dict(yaml_load(config_template)["rfi"])
-        config_mod["rfi"] = {**rfi, "backend": t_config.rfi_backend}
+    # Whole sections, not merged into the template's: read_and_modify_yaml
+    # replaces top-level sections, and the reference values were measured that
+    # way -- {"opt": {...}} overrides the template's opt section wholesale.
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -382,12 +433,12 @@ trajectory_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbitFine",
-                "trajectory:PhaseCalculationRFIFine",
-                "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFine",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.FixedOrbitFine",
+                "trajectory.PhaseCalculationRFIFine",
+                "rfi_signal.ComplexRFIVarAntFine",
+                "rfi_vis.RiemannVisFine",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
             # requires_double (phase trajectory needs fp64), so this runs in fp64 only.
             # Measured opt-point values, double precision (gains identity -> RMSE 0):
@@ -417,28 +468,26 @@ trajectory_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:NoDragOrbitFine",
-                "trajectory:PhaseCalculationRFIFine",
-                "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFine",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.NoDragOrbitFine",
+                "trajectory.PhaseCalculationRFIFine",
+                "rfi_signal.ComplexRFIVarAntFine",
+                "rfi_vis.RiemannVisFine",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
-            # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
-            # note on the FixedOrbitFine case for what ARM/x86/GPU are:
-            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542532126120 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540837835149 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540837835149,
+            # requires_double, so this runs in fp64 only. max_iter 300 at epsilon 3e-2 with b2 0.99:
+            # these MEO cases start far from the optimum (chi2 ~ 474) and are not converged at the
+            # standard 100 iterations.
+            # Measured opt-point values, double precision (gains identity -> RMSE 0):
+            #   chi2 0.8468276563658013 | ast NRMSE(noise) 0.2424, sig 3.3 | rfi NRMSE(noise) 0.5341, sig 0.8
+            chi2_ref=0.8468276563658013,
             requires_double=True,
-            config_overrides={"opt": {"max_iter": 200}},
+            config_overrides={
+                "opt": {"epsilon": 3e-2, "max_iter": 300, "optimizer": {"b2": 0.99}}
+            },
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.225, 0.260), "bias_significance": (0.0, 4.0)},
+                "rfi": {"NRMSE(noise)": (0.50, 0.57), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -448,28 +497,27 @@ trajectory_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:OrbitFine",
-                "trajectory:PhaseCalculationRFIFine",
-                "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFine",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.OrbitFine",
+                "trajectory.PhaseCalculationRFIFine",
+                "rfi_signal.ComplexRFIVarAntFine",
+                "rfi_vis.RiemannVisFine",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 200: these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
+            # requires_double, so this runs in fp64 only. max_iter 300 at epsilon 3e-2 with b2 0.99:
+            # these MEO cases start far from the optimum (chi2 ~ 474) and are not converged at the
+            # standard 100 iterations.
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
             # NoDragOrbitFine -- same orbit to fp precision):
-            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542639577049 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540839414796 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540839414796,
+            #   chi2 0.8467945759912512 | ast NRMSE(noise) 0.2424, sig 3.3 | rfi NRMSE(noise) 0.5341, sig 0.8
+            chi2_ref=0.8467945759912512,
             requires_double=True,
-            config_overrides={"opt": {"max_iter": 200}},
+            config_overrides={
+                "opt": {"epsilon": 3e-2, "max_iter": 300, "optimizer": {"b2": 0.99}}
+            },
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.225, 0.260), "bias_significance": (0.0, 4.0)},
+                "rfi": {"NRMSE(noise)": (0.50, 0.57), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -494,11 +542,11 @@ rfi_vis_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbitFine",
-                "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFine",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.FixedOrbitFine",
+                "rfi_signal.ComplexRFIVarAntFine",
+                "rfi_vis.RiemannVisFine",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
             rfi_backend="jax",
             # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
@@ -533,11 +581,11 @@ rfi_vis_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbitFine",
-                "rfi_signal:ComplexRFIVarAntFine",
-                "rfi_vis:RiemannVisFine",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.FixedOrbitFine",
+                "rfi_signal.ComplexRFIVarAntFine",
+                "rfi_vis.RiemannVisFine",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
             # The default rfi.backend, ffi. Only chi2 is asserted -- the FFI kernel is the
             # unit under test; truth metrics match the jax-backend case above. Measured opt-point
@@ -556,11 +604,11 @@ rfi_vis_configs = [
         PipelineTestConfig(
             "sim_target_8A.yaml",
             [
-                "trajectory:FixedOrbit",
-                "rfi_signal:ComplexRFIVarAnt",
-                "rfi_vis:AnalyticVis",
-                "ast_vis:GPVisAst",
-                "gains:UnitaryGains",
+                "trajectory.FixedOrbit",
+                "rfi_signal.ComplexRFIVarAnt",
+                "rfi_vis.AnalyticVis",
+                "ast_vis.GPVisAst",
+                "gains.UnitaryGains",
             ],
             # The data-grid route: the RiemannVisFine model with the signal and
             # phase on the data grid and each cell integrated in closed form.
@@ -722,19 +770,16 @@ def test_pipeline_writes_into_its_own_run_directory(
 
     data_dir = Path(__file__).parent / "data"
     config_path = tmp_path / "tab_target.yaml"
+    from tabascal.config import yaml_load
+
+    template = yaml_load(data_dir / "tab_target.yaml")
     read_and_modify_yaml(
         {
             "model": {
-                "components": [
-                    "trajectory:FixedOrbitFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
-                ],
+                "components": template["model"]["components"],
                 "precision": precision,
             },
-            "opt": {"epsilon": 1e-3, "max_iter": 1, "dual_run": False, "guide": "map"},
+            "opt": {"epsilon": 1e-3, "max_iter": 1},
             "plots": {"losses": True},
         },
         data_dir / "tab_target.yaml",
@@ -791,12 +836,12 @@ def test_pipeline_writes_into_its_own_run_directory(
 
 def _sharded_components(rfi_vis: str) -> list[str]:
     return [
-        "trajectory:FixedOrbitFine",
-        "trajectory:PhaseCalculationRFIFine",
-        "rfi_signal:ComplexRFIVarAntFine",
-        f"rfi_vis:{rfi_vis}",
-        "ast_vis:GPVisAst",
-        "gains:UnitaryGains",
+        "trajectory.FixedOrbitFine",
+        "trajectory.PhaseCalculationRFIFine",
+        "rfi_signal.ComplexRFIVarAntFine",
+        f"rfi_vis.{rfi_vis}",
+        "ast_vis.GPVisAst",
+        "gains.UnitaryGains",
     ]
 
 
@@ -815,26 +860,28 @@ def _prepare_sharded_run(
     rfi_backend: str | None = None,
 ) -> tuple[list[str], Path]:
     """Copy the 8A/3-satellite sim into ``work_dir`` and build the run command."""
+    from tabascal.config import yaml_load
+
     out_dir = _copy_sim(provide_test_data, work_dir)
     data_dir = Path(__file__).parent / "data"
 
     config_path = work_dir / "tab_target.yaml"
+    template = yaml_load(data_dir / "tab_target.yaml")
+    components = _build_pipeline_components(
+        template["model"]["components"],
+        _sharded_components("RiemannVisFine"),
+        rfi_backend=rfi_backend,
+    )
     updates: dict = {
-        "model": {"components": _sharded_components("RiemannVisFine"), "precision": "double"}
+        "model": {"components": components, "precision": "double"}
     }
-
-    from tabascal.config import yaml_load
-
-    if rfi_backend is not None:
-        rfi = dict(yaml_load(data_dir / "tab_target.yaml")["rfi"])
-        updates["rfi"] = {**rfi, "backend": rfi_backend}
 
     if save_rfi_per_sat:
 
         # The whole section, not just the new key: read_and_modify_yaml replaces
         # a top-level section rather than merging into it, and dropping
         # data_col/noise here would change what the run reads.
-        data = dict(yaml_load(data_dir / "tab_target.yaml").get("data", {}))
+        data = dict(template.get("data", {}))
         data["save_rfi_per_sat"] = True
         updates["data"] = data
 

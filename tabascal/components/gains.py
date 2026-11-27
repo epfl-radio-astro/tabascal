@@ -1,57 +1,27 @@
 from tabascal.components import Component, assert_attr_shape
 from tabascal.interferometry import apply_gains
 from tabascal.dist import standard_normal
-from tabascal.config import TabConfig
 from tabascal.ms import read_caltable
+from tabascal.schema import (
+    FiniteFloat,
+    NonNegativeInt,
+    OptionalPathStr,
+    PositiveFloat,
+    StrictBool,
+    StrictConfigModel,
+)
 
 import jax.numpy as jnp
 from jax import Array
 
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import Field, model_validator
 
 import os
 import warnings
 
-from typing import Dict, List, Tuple
-
-def _missing_key(key: str) -> ValueError:
-    """The error for a gains key the config does not carry at all.
-
-    Naming it is the whole point: four keys are read here, and a bare "validation
-    failed" leaves the reader to find which one is missing by bisection.
-    """
-
-    return ValueError(
-        f"Gains configuration validation failed: the config has no gains:{key}. "
-        "Give it a value, or null to take the default."
-    )
-
-
-def _positive_scale(key: str, value, convert, reason: str) -> float:
-    """A gain-prior scale in the units the model works in, checked to be usable.
-
-    ``value`` is what the config says and ``convert`` puts it in those units (a
-    percentage of ``amp_mean``, degrees to radians, or unchanged for a value already
-    in them). Only ``None`` means unset, and the caller handles it: ``not value``
-    also caught 0, so a zero prior width — a degenerate distribution, not an absent
-    one — was silently replaced by a default nobody wrote, while NaN and infinity
-    went through untouched.
-    """
-
-    if isinstance(value, (float, int)):
-        converted = float(convert(value))
-    else:
-        raise ValueError(f"Config parameter (gains:\n\t{key}: {value}) is not of type float or int.")
-
-    if not np.isfinite(converted) or converted <= 0:
-        raise ValueError(
-            f"Config parameter (gains:\n\t{key}: {value}) is not a positive, finite "
-            f"number. {reason}"
-        )
-
-    return converted
-
+from typing import Dict, FrozenSet, List, Literal, Optional, Tuple, Union
 
 #: The width of the amplitude prior when the config leaves it unset, as a percentage
 #: of ``amp_mean``. A real array's antennas differ in sensitivity by far more than a
@@ -80,112 +50,101 @@ DEFAULT_AMP_STD_PERCENT = 20.0
 #: than tens of sigma outside it.
 DEFAULT_PHASE_STD_DEGREES = 180.0
 
-#: What ``gains.fit`` may name, and the parameter blocks each one fits. ``both`` is
-#: the same fit as ``complex``, under the name the amplitude/phase split suggests.
+#: What ``ConstGains`` ``fit`` may name, and the parameter blocks each one fits.
 GAIN_FIT_BLOCKS = {
     "complex": ("amp", "phase"),
-    "both": ("amp", "phase"),
     "amplitude": ("amp",),
     "phase": ("phase",),
 }
 
 
-def resolve_gain_fit(gains_config: Dict) -> str:
-    """Which part of the gain is fitted: ``complex`` (the default), ``amplitude`` or ``phase``.
+class ConstGainsConfig(StrictConfigModel):
+    """Configuration for :class:`ConstGains`."""
 
-    ``both`` is read as ``complex``. The part that is not fitted is held at its
-    initial value rather than at a value of its own.
-    """
+    init: Literal["prior", "est"] = Field(
+        default="prior",
+        description=(
+            "Where the gains start: 'prior', or 'est', the measured gain in the file "
+            "est names, projected into the gain gauge."
+        ),
+    )
+    est: OptionalPathStr = Field(
+        default=None,
+        description=(
+            "Path to a measured gain read by init: est: an .npz of per-antenna gains "
+            "(key 'gain') or a CASA calibration table."
+        ),
+        json_schema_extra={"input_path": True},
+    )
+    fit: Literal["complex", "amplitude", "phase"] = Field(
+        default="complex",
+        description=(
+            "Which part of the gain is fitted: 'complex', 'amplitude', or 'phase'; the "
+            "unfitted part is held at the measured gain of est (or unity for init: prior)."
+        ),
+    )
+    ref_ant: Union[NonNegativeInt, Literal["auto"]] = Field(
+        default="auto",
+        description=(
+            "Phase reference antenna whose phase is pinned to 0. 'auto' selects the "
+            "first antenna with unflagged data."
+        ),
+    )
+    fix_flux_scale: StrictBool = Field(
+        default=True,
+        description=(
+            "Keep the zero-sum log-amplitude gauge so gains carry no overall flux scale. "
+            "false frees overall amplitude and requires FixedDiscreteSky when fitting amplitude."
+        ),
+    )
+    amp_mean: PositiveFloat = Field(
+        default=1.0,
+        description="Median of the lognormal amplitude prior (scale that amp_std_pct is a percentage of).",
+    )
+    phase_mean_deg: FiniteFloat = Field(
+        default=0.0,
+        description="Mean of the gain phase prior, in degrees.",
+    )
+    amp_std_pct: PositiveFloat = Field(
+        default=DEFAULT_AMP_STD_PERCENT,
+        description=f"Standard deviation of the gain amplitude prior as a percentage of amp_mean (default {DEFAULT_AMP_STD_PERCENT:g}%).",
+    )
+    phase_std_deg: PositiveFloat = Field(
+        default=DEFAULT_PHASE_STD_DEGREES,
+        description=f"Standard deviation of the gain phase prior, in degrees (default {DEFAULT_PHASE_STD_DEGREES:g} deg).",
+    )
 
-    fit = gains_config.get("fit")
+    @model_validator(mode="after")
+    def _est_is_read_exactly_when_given(self) -> "ConstGainsConfig":
+        if self.init == "est" and self.est is None:
+            raise ValueError(
+                "init: est reads the measured gain in the file 'est' names, and est is "
+                "not set. Give est a path to an .npz or a calibration table."
+            )
+        if self.init != "est" and self.est is not None:
+            raise ValueError(
+                f"est is set ({self.est!r}) but nothing reads it: only init: est does. "
+                "Set init: est, or leave est out."
+            )
+        return self
 
-    if fit is None:
-        return "complex"
+    def prior_scales(self) -> Dict[str, float]:
+        """The gain prior in the units the model works in.
 
-    if not isinstance(fit, str) or fit not in GAIN_FIT_BLOCKS:
-        raise ValueError(
-            f"Config parameter (gains:\n\tfit: {fit}) is not one of "
-            f"{sorted(GAIN_FIT_BLOCKS)}."
-        )
-
-    return "complex" if fit == "both" else fit
-
-
-def validate_gain_scales(gains_config: Dict) -> Dict:
-    """Validate and normalise the scale parameters of the gain prior, in place.
-
-    ``amp_std`` is given as a percentage of ``amp_mean`` and ``phase_std`` in
-    degrees; both come back in the units the model works in — a fraction and
-    radians. :class:`ConstGains` is the only component that reads them:
-    :class:`UnitaryGains` fits no gain and reads nothing from the gains section
-    at all.
-
-    A key is defaulted when, and only when, it is ``None`` or absent, so a
-    literal 0 is taken at its word: a zero ``amp_std`` or ``phase_std`` is an
-    error rather than a width — a zero-width prior pins every gain to its mean,
-    which is a mistake worth naming rather than a default worth guessing.
-    """
-
-    try:
-        gp_amp_mean = gains_config["amp_mean"]
-        gp_amp_std = gains_config["amp_std"]
-        gp_phase_mean = gains_config["phase_mean"]
-        gp_phase_std = gains_config["phase_std"]
-    except KeyError as e:
-        raise _missing_key(e.args[0]) from e
-
-    # Defaulted only when it is genuinely unset. `not gp_amp_mean` also caught 0,
-    # which would silently become a 1.0 nobody wrote, and let NaN and infinity
-    # through untouched -- and every use of amp_mean divides by it or takes its
-    # logarithm.
-    if gp_amp_mean is None: # Set Default
-        est_gp_amp_mean = 1.0
-        gains_config["amp_mean"] = est_gp_amp_mean
-    else:
-        gains_config["amp_mean"] = _positive_scale(
-            "amp_mean",
-            gp_amp_mean,
-            float,
-            "It is the scale the gain amplitudes are measured against: amp_std is a "
-            "percentage of it, and a constant gain is fitted as its logarithm.",
-        )
-
-    if gp_amp_std is None: # Set Default
-        est_gp_amp_std = DEFAULT_AMP_STD_PERCENT / 100 * gains_config["amp_mean"]
-        gains_config["amp_std"] = est_gp_amp_std
-    else:
-        gains_config["amp_std"] = _positive_scale(
-            "amp_std",
-            gp_amp_std,
-            # float() first, then divide: an int large enough to lose precision in a
-            # float rounds differently if the true division goes first.
-            lambda std: float(std) / 100 * gains_config["amp_mean"],
-            "It is the width of the prior over the gain amplitudes, as a percentage "
-            "of amp_mean; a zero width pins every amplitude to amp_mean and leaves "
-            "the fit nothing to move.",
-        )
-
-    if gp_phase_mean is None: # Set Default
-        est_gp_phase_mean = 0.0
-        gains_config["phase_mean"] = est_gp_phase_mean
-    elif isinstance(gp_phase_mean, (float, int)):
-        gains_config["phase_mean"] = float(gp_phase_mean)
-    else:
-        raise ValueError(f"Config parameter (gains:\n\tphase_mean: {gp_phase_mean}) is not of type float or int.")
-
-    if gp_phase_std is None: # Set Default
-        est_gp_phase_std = float(jnp.deg2rad(DEFAULT_PHASE_STD_DEGREES))
-        gains_config["phase_std"] = est_gp_phase_std
-    else:
-        gains_config["phase_std"] = _positive_scale(
-            "phase_std",
-            gp_phase_std,
-            jnp.deg2rad,
-            "It is the width of the prior over the gain phases, in degrees; a zero "
-            "width pins every phase to phase_mean and leaves the fit nothing to move.",
-        )
-
-    return gains_config
+        ``amp_std_pct`` is given as a percentage of ``amp_mean``, and ``phase_mean_deg``
+        and ``phase_std_deg`` in degrees; they come back as a fraction of the
+        amplitude scale and in radians. The arithmetic is the one the sectioned config's validator did,
+        to the bit: ``float(std) / 100`` rather than ``std / 100``, since an int
+        too large for a float is rounded by ``float()`` but divided exactly by
+        ``/``, and the two orders differ in the last bit.
+        """
+        amp_mean = float(self.amp_mean)
+        return {
+            "amp_mean": amp_mean,
+            "amp_std": float(self.amp_std_pct) / 100 * amp_mean,
+            "phase_mean": float(jnp.deg2rad(self.phase_mean_deg)),
+            "phase_std": float(jnp.deg2rad(self.phase_std_deg)),
+        }
 
 
 class UnitaryGains(Component):
@@ -195,8 +154,8 @@ class UnitaryGains(Component):
 
         vis_obs[p, q] = vis_ast[p, q] + vis_rfi[p, q]
 
-    Which is why it reads nothing from the ``gains`` section of the config: no
-    prior width, no mean and no seed applies to a gain that is fixed at unity.
+    Which is why it takes no options: no prior width, no mean and no seed
+    applies to a gain that is fixed at unity.
     """
 
     required_inputs = {
@@ -209,7 +168,7 @@ class UnitaryGains(Component):
     }
     parameter_shapes = {}
 
-    def setup(self, tab_config: TabConfig):
+    def setup(self, tab_config):
         """All validation and error-prone operations here"""
         try:
             self.n_ant = tab_config.n_ant
@@ -248,16 +207,11 @@ _CALTABLE_CONST_RTOL = 1e-5
 
 
 def component_class_names(tab_config) -> List[str]:
-    """The bare class names of ``model.components``, however they were written.
-
-    ``"gains:ConstGains"`` and ``"gains.ConstGains"`` are the same component, and
-    :mod:`tabascal.imports` accepts either, so a rule keyed on which components are
-    present has to read them the same way.
-    """
-
-    components = (tab_config.args.get("model") or {}).get("components") or []
-
-    return [str(ref).replace(":", ".").rsplit(".", 1)[-1] for ref in components]
+    """The bare class names of ``model.components``."""
+    run_cfg = getattr(tab_config, "config", None)
+    if run_cfg is not None:
+        return run_cfg.model.component_class_names()
+    return list(getattr(tab_config, "component_names", ()))
 
 
 def zero_sum_basis(n: int) -> NDArray:
@@ -464,17 +418,17 @@ class ConstGains(Component):
     **What has to be true for it to be identifiable** (issue #124). A gain is only
     constrained by a model term the gain cannot deform:
 
-    * Pair it with ``rfi_signal:ComplexRFIConstAnt`` (or ``ComplexRFIConstAntFine``).
+    * Pair it with ``rfi_signal.ComplexRFIConstAnt`` (or ``ComplexRFIConstAntFine``).
       With the per-antenna RFI model ``ComplexRFIVarAnt`` or ``ComplexRFIVarAntFine`` the gain is an exact no-op on the RFI term —
       ``g_p A_p conj(g_q A_q)`` is a reparametrisation of an already-free ``A_p`` —
       so setup warns when the two are combined.
-    * The astronomical GP (``ast_vis:GPVisAst``) has per-baseline freedom and absorbs
-      a gain in the same way. A rigid sky — ``ast_signal:FixedDiscreteSky`` with
-      ``ast_vis:DiscreteSkyVis`` — is what anchors the gain's overall scale.
+    * The astronomical GP (``ast_vis.GPVisAst``) has per-baseline freedom and absorbs
+      a gain in the same way. A rigid sky — ``ast_signal.FixedDiscreteSky`` with
+      ``ast_vis.DiscreteSkyVis`` — is what anchors the gain's overall scale.
 
     **The gauge.** The gain is purely RELATIVE and carries no absolute flux scale:
 
-    * the overall PHASE is unobservable, so ``gains.ref_ant``'s phase is pinned to 0
+    * the overall PHASE is unobservable, so ``ConstGains.ref_ant``'s phase is pinned to 0
       and the other ``n_ant - 1`` phases are free. The default reference is the first
       antenna with any unflagged data. One reference only pins one *connected* group
       of antennas, so when the phase is fitted setup also refuses an array the
@@ -492,33 +446,35 @@ class ConstGains(Component):
     coordinate is flat in the likelihood however much data there is, which ruins the
     conditioning of the fit and makes a likelihood-only Fisher matrix singular.
 
-    The prior on ``|g_p|`` is lognormal: ``gains.amp_std`` (a percentage) is used as
+    The prior on ``|g_p|`` is lognormal: ``ConstGains.amp_std_pct`` (a percentage) is used as
     the standard deviation of ``log|g|``, which agrees with a fractional spread to
-    first order and keeps the gain positive. ``gains.amp_mean`` is then the *median*
+    first order and keeps the gain positive. ``ConstGains.amp_mean`` is then the *median*
     of that prior — its centre in log space, not its arithmetic mean — and it is that
     only when the flux scale is free: under the zero-sum gauge the geometric mean is 1
     by construction and ``amp_mean`` only sets the scale the percentage is taken of,
     so a non-unit value there warns when the amplitude is fitted.
 
-    ``gains.fix_flux_scale: false`` lifts the amplitude constraint, and when the
+    ``ConstGains.fix_flux_scale: false`` lifts the amplitude constraint, and when the
     amplitude is fitted it is accepted only with a fixed-flux sky in the model, which
-    is the one thing that can set the scale. ``gains.init`` optionally starts the fit at a previously measured gain —
-    an ``.npz`` (key ``gain``, shape ``(n_ant,)``) or a calibration table — which is a
-    much better starting point than the prior mean. Any such gain is *projected* into
-    the gauge above rather than taken as given.
+    is the one thing that can set the scale. ``ConstGains.init: est`` with ``ConstGains.est``
+    starts the fit at a previously measured gain — an ``.npz`` (key ``gain``, shape ``(n_ant,)``)
+    or a calibration table — which is a much better starting point than the prior mean.
+    Any such gain is *projected* into the gauge above rather than taken as given.
 
-    ``gains.fit`` chooses what is fitted: ``complex`` (the default, alias ``both``),
+    ``ConstGains.fit`` chooses what is fitted: ``complex`` (the default),
     ``amplitude`` or ``phase``. The part left out is held at the measured gain of
-    ``gains.init``, in the same gauge, so an amplitude-only fit keeps a calibration
+    ``ConstGains.est``, in the same gauge, so an amplitude-only fit keeps a calibration
     table's phases and a phase-only fit its amplitudes; with ``init: prior`` (or
     unset) it is unity — ``|g| = 1`` or a zero phase — whatever ``amp_mean`` or
-    ``phase_mean`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
+    ``phase_mean_deg`` say. Each partial fit has ``n_ant - 1`` parameters (``n_ant`` for an
     amplitude fit with the flux scale freed).
 
     It binds the observation shapes and the amplitude and phase scales of the prior,
     and nothing else: the correlation lengths that used to sit beside them belonged
     to the Gaussian process gain removed in #129, and a constant gain has none.
     """
+
+    Config = ConstGainsConfig
 
     required_inputs = {
         "vis_rfi": ("n_bl", "n_freq", "n_time"),
@@ -533,10 +489,10 @@ class ConstGains(Component):
         "gains_phase_base": ("n_ant-1",),
     }
 
-    def setup(self, tab_config: TabConfig):
+    def setup(self, tab_config):
         """All validation and error-prone operations here"""
         try:
-            gains_config = validate_gain_scales(tab_config.args["gains"])
+            cfg = self.config
 
             self.n_ant = tab_config.n_ant
             self.n_bl = tab_config.n_bl
@@ -545,10 +501,11 @@ class ConstGains(Component):
             self.a1 = tab_config.a1
             self.a2 = tab_config.a2
 
-            self.gp_amp_mean = gains_config["amp_mean"]
-            self.gp_amp_std = gains_config["amp_std"]
-            self.gp_phase_mean = gains_config["phase_mean"]
-            self.gp_phase_std = gains_config["phase_std"]
+            scales = cfg.prior_scales()
+            self.gp_amp_mean = scales["amp_mean"]
+            self.gp_amp_std = scales["amp_std"]
+            self.gp_phase_mean = scales["phase_mean"]
+            self.gp_phase_std = scales["phase_std"]
 
             # amp_std is a fractional spread (the config gives a percentage); use it
             # as the log-amplitude sigma, which makes the prior on |g| lognormal and
@@ -560,11 +517,11 @@ class ConstGains(Component):
             self.log_amp_std = self.gp_amp_std / max(self.gp_amp_mean, 1e-12)
 
             components = component_class_names(tab_config)
-            self.fit = resolve_gain_fit(gains_config)
+            self.fit = cfg.fit
             self.fit_amp = "amp" in GAIN_FIT_BLOCKS[self.fit]
             self.fit_phase = "phase" in GAIN_FIT_BLOCKS[self.fit]
-            self.fix_flux_scale = self._resolve_fix_flux_scale(gains_config, components)
-            self.ref_ant = self._resolve_ref_ant(gains_config, tab_config)
+            self.fix_flux_scale = self._resolve_fix_flux_scale(cfg.fix_flux_scale, components)
+            self.ref_ant = self._resolve_ref_ant(cfg.ref_ant, tab_config)
             self._warn_on_rfi_degeneracy(components)
 
             # Under the zero-sum gauge the geometric mean of |g| is 1 by construction,
@@ -586,61 +543,49 @@ class ConstGains(Component):
 
             if self.fit_amp and self.fix_flux_scale and self.gp_amp_mean != 1.0:
                 warnings.warn(
-                    f"gains.amp_mean = {self.gp_amp_mean} does not set the fitted gain "
-                    "amplitude while gains.fix_flux_scale is true: the zero-sum gauge "
+                    f"ConstGains.amp_mean = {self.gp_amp_mean} does not set the fitted gain "
+                    "amplitude while fix_flux_scale is true: the zero-sum gauge "
                     "makes the geometric mean of |g| exactly 1, and amp_mean only sets "
-                    "the scale that gains.amp_std's percentage is taken of. Set "
-                    "gains.fix_flux_scale to false (which needs a fixed-flux sky) for "
+                    "the scale that amp_std_pct's percentage is taken of. Set "
+                    "fix_flux_scale to false (which needs a fixed-flux sky) for "
                     "amp_mean to be the amplitude the fit starts at.",
                     UserWarning,
                     stacklevel=2,
                 )
 
             self._set_outputs()
-            self._compute_init_params(gains_config.get("init"))
+            self._compute_init_params(cfg.est if cfg.init == "est" else "prior")
             # Validate dimensions
             self._validate_dimensions()
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
 
-    def _resolve_fix_flux_scale(self, gains_config: Dict, components: List[str]) -> bool:
+    def _resolve_fix_flux_scale(self, fix_flux_scale: bool, components: List[str]) -> bool:
         """Whether the zero-sum log-amplitude constraint is kept.
 
         Lifting it is only meaningful against a sky whose flux is fixed: with every
         other sky model the overall gain amplitude and the sky amplitude are the same
         parameter, and the fit is free to split them anywhere.
         """
-
-        fix_flux_scale = gains_config.get("fix_flux_scale", True)
-
-        if fix_flux_scale is None:
-            fix_flux_scale = True
-
-        if not isinstance(fix_flux_scale, bool):
-            raise ValueError(
-                f"Config parameter (gains:\n\tfix_flux_scale: {fix_flux_scale}) is "
-                "not of type bool."
-            )
-
         # A phase-only fit holds the amplitude at its initial value, so there is no
         # overall amplitude for the fit to drift along; the flag then only says
         # whether that held amplitude keeps its absolute scale.
         if not fix_flux_scale and self.fit_amp and "FixedDiscreteSky" not in components:
             raise ValueError(
-                "gains.fix_flux_scale is false, which frees the overall gain "
+                "ConstGains.fix_flux_scale is false, which frees the overall gain "
                 "amplitude, but the model has no fixed-flux sky to set the flux "
                 "scale against. The overall |g| and the amplitude of a fitted sky or "
                 "RFI signal are then one and the same parameter: the fit can scale "
                 "the gains by any c and the model visibilities by 1/c^2 without "
                 "changing the likelihood, and it drifts. Add "
-                "ast_signal:FixedDiscreteSky (with ast_vis:DiscreteSkyVis) to "
-                "model.components, or leave gains.fix_flux_scale true."
+                "ast_signal.FixedDiscreteSky (with ast_vis.DiscreteSkyVis) to "
+                "model.components, or leave fix_flux_scale true."
             )
 
         return fix_flux_scale
 
-    def _resolve_ref_ant(self, gains_config: Dict, tab_config: TabConfig) -> int:
+    def _resolve_ref_ant(self, ref_ant: Union[int, str], tab_config) -> int:
         """The antenna whose phase is pinned to zero."""
 
         has_data, groups = antenna_connectivity(
@@ -668,31 +613,24 @@ class ConstGains(Component):
                 "that share no baseline with each other: "
                 + "; ".join(_format_group(g) for g in groups)
                 + ". A gain phase is only measured relative to another antenna's, "
-                "along a chain of baselines that carry data, so pinning gains.ref_ant "
+                "along a chain of baselines that carry data, so pinning ref_ant "
                 "in one group leaves every other group's overall phase unconstrained "
                 "— one reference cannot serve them all. Run the groups separately, or "
                 "flag the smaller ones out of this run."
             )
 
-        ref_ant = gains_config.get("ref_ant")
-
-        if ref_ant is None:
+        if ref_ant == "auto":
             ref_ant = int(np.flatnonzero(has_data)[0])
         else:
-            if isinstance(ref_ant, bool) or not isinstance(ref_ant, (int, np.integer)):
-                raise ValueError(
-                    f"Config parameter (gains:\n\tref_ant: {ref_ant}) is not of type "
-                    "int."
-                )
             ref_ant = int(ref_ant)
             if not 0 <= ref_ant < self.n_ant:
                 raise ValueError(
-                    f"gains.ref_ant = {ref_ant} is not an antenna of this "
+                    f"ref_ant = {ref_ant} is not an antenna of this "
                     f"observation, which has {self.n_ant}."
                 )
             if not has_data[ref_ant]:
                 raise ValueError(
-                    f"gains.ref_ant = {ref_ant} is fully flagged, so its phase is "
+                    f"ref_ant = {ref_ant} is fully flagged, so its phase is "
                     "not constrained by any visibility and cannot be the reference "
                     f"the other gains are measured against. Antennas with data: "
                     f"{np.flatnonzero(has_data).tolist()}."
@@ -710,12 +648,12 @@ class ConstGains(Component):
             if name not in components:
                 continue
             warnings.warn(
-                f"ConstGains is combined with rfi_signal:{name}, whose "
+                f"ConstGains is combined with rfi_signal.{name}, whose "
                 "RFI amplitude A_p is already free per antenna. The RFI visibility "
                 "g_p A_p conj(g_q A_q) is then unchanged by g_p -> c_p g_p together "
                 "with A_p -> A_p / c_p, so the gain is a flat direction of the RFI "
                 "term and only the astronomical model constrains it. Pair ConstGains "
-                f"with rfi_signal:{name.replace('VarAnt', 'ConstAnt')}, whose RFI amplitude carries "
+                f"with rfi_signal.{name.replace('VarAnt', 'ConstAnt')}, whose RFI amplitude carries "
                 "no per-antenna freedom of its own. See issue #124.",
                 UserWarning,
                 stacklevel=2,
@@ -828,7 +766,7 @@ class ConstGains(Component):
 
     def _compute_init_params(self, init):
 
-        if init is None or init == "prior":
+        if init == "prior":
             # The fitted part starts at the prior mean; a held part has no measured
             # value to keep, so it is unity: |g| = 1 or phase 0.
             log_amp = np.full(self.n_ant, self.log_amp_offset if self.fit_amp else 0.0)
@@ -841,8 +779,8 @@ class ConstGains(Component):
             print(f"Initialising ConstGains at the measured antenna gain from {init}")
         else:
             raise ValueError(
-                f"Config parameter (gains:\n\tinit: {init}) is neither 'prior' nor a "
-                "path to an .npz of per-antenna gains or to a calibration table."
+                f"ConstGains.est = {init!r} is not a path to an .npz of per-antenna gains "
+                "or to a calibration table."
             )
 
         self.init_params = {

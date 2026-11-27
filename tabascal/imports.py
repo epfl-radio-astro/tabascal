@@ -75,7 +75,7 @@ def _listing(label: str, names: List[str]) -> str:
     return _sentence(f"{label}: {', '.join(names)}." if names else "")
 
 
-#: Components folded into another one as an ``rfi.backend``, and that one.
+#: Components folded into another one as its ``backend`` option, and that one.
 _BACKEND_OF = {
     "RiemannVisFFIFine": "RiemannVisFine",
     "RiemannVisVariableFFIFine": "RiemannVisVariableFine",
@@ -86,7 +86,7 @@ def _missing_class_message(ref: str, cls_name: str, module) -> str:
     folded = _BACKEND_OF.get(cls_name) if module.__name__.endswith(".rfi_vis") else None
     return (
         f"'{ref}': module '{module.__name__}' has no class '{cls_name}'. "
-        + _sentence(folded and f"It is now {folded} with rfi.backend: ffi.")
+        + _sentence(folded and f"It is now {folded} with backend: ffi.")
         + _listing("It defines", _offered_classes(module))
     )
 
@@ -205,3 +205,21 @@ def import_components(
         )
 
     return classes
+
+
+def canonical_component_ref(
+    ref: str,
+    cls: Type,
+    *,
+    base_package: str = "tabascal.components",
+) -> str:
+    """Canonical ``'module.Class'`` reference for a resolved component class.
+
+    In-tree components under ``tabascal.components.<mod>`` are written as
+    ``'<mod>.<Class>'``; external classes keep their dotted module path.
+    """
+    prefix = f"{base_package}."
+    mod = getattr(cls, "__module__", "")
+    if mod.startswith(prefix):
+        return f"{mod[len(prefix):]}.{cls.__name__}"
+    return ref.replace(":", ".")

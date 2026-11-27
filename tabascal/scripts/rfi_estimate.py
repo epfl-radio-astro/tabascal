@@ -2,15 +2,16 @@
 
 Two ways in, and they name the satellites differently:
 
-* **A tabascal config** (``-c``). The run's own ``satellites``, ``data`` and
-  ``rfi.min_elevation`` sections decide what is filtered for, the MS is read once
-  through :class:`~tabascal.config.TabConfig`, and the curves come back ordered
-  to match ``satellites.norad_ids``. This is the estimate ``rfi.init:
-  matched-filter`` makes internally, written out.
+* **A tabascal config** (``-c``). The run's own ``data`` and trajectory
+  component settings (``norad_ids``, orbit sources, ``min_elevation_deg``)
+  decide what is filtered for, the MS is read once through
+  :class:`~tabascal.config.TabConfig`, and the curves come back ordered to
+  match the trajectory's ``norad_ids``. This is the estimate
+  ``rfi_signal.init: matched-filter`` makes internally, written out.
 * **An MS plus NORAD IDs** (``-ms`` with ``-n``/``-np``), for an observation
   tabascal has not been configured against.
 
-Either way the output is the ``rfi.est`` interchange format, so it can seed a
+Either way the output is the ``rfi_signal.est`` interchange format, so it can seed a
 later run unchanged.
 
 ``--fit-offset`` adds the along-track (time-offset) search of GitHub #190 on top
@@ -47,8 +48,8 @@ def build_parser(parser=None):
     src = parser.add_mutually_exclusive_group()
     src.add_argument(
         "-c", "--config", default=None,
-        help="Path to a tabascal config file. Its satellites, data and "
-        "rfi.min_elevation sections drive the extraction and the MS is read once.",
+        help="Path to a tabascal config file. Its data section and trajectory "
+        "component drive the extraction and the MS is read once.",
     )
     src.add_argument(
         "-n", "--norad-ids", dest="norad_ids", default=None,
@@ -128,7 +129,7 @@ def build_parser(parser=None):
         "--min-elevation", dest="min_elevation", type=float, default=None,
         metavar="DEG",
         help="Elevation in degrees below which a satellite is not filtered for. "
-        "Defaults to the config's rfi.min_elevation with -c, and to 0 (the "
+        "Defaults to the config's trajectory min_elevation_deg with -c, and to 0 (the "
         "geometric horizon) otherwise.",
     )
     elevation.add_argument(
@@ -296,8 +297,16 @@ def resolve_norad_ids(args):
 
     raise SystemExit(
         "No NORAD IDs given. Provide -n/--norad-ids, -np/--norad-path, or a "
-        "-c/--config whose satellites section names them."
+        "-c/--config whose trajectory component names them."
     )
+
+
+def _data_get(config, key, default=None):
+    if config is None:
+        return default
+    if hasattr(config, "data"):
+        return getattr(config.data, key, default)
+    return (config.get("data") or {}).get(key, default)
 
 
 def resolve_ms_path(args, config):
@@ -312,11 +321,11 @@ def resolve_ms_path(args, config):
         return os.path.abspath(args.ms_path)
 
     if config is not None:
-        ms_path = config.get("data", {}).get("ms_path")
+        ms_path = _data_get(config, "ms_path")
         if not config_is_unset(ms_path):
             return config_path(ms_path, "data.ms_path")
 
-    config_out_dir = (config or {}).get("data", {}).get("out_dir")
+    config_out_dir = _data_get(config, "out_dir")
     if args.out_dir:
         out_dir = os.path.abspath(args.out_dir)
     elif not config_is_unset(config_out_dir):
@@ -338,7 +347,7 @@ def resolve_data_col(args, config):
     if args.data_col is not None:
         return args.data_col
     if config is not None:
-        return config.get("data", {}).get("data_col") or "DATA"
+        return _data_get(config, "data_col") or "DATA"
 
     return "DATA"
 
@@ -356,7 +365,7 @@ def resolve_corr(args, config):
     if args.corr is not None:
         corr = args.corr
     elif config is not None:
-        corr = config.get("data", {}).get("corr") or "xx"
+        corr = _data_get(config, "corr") or "xx"
     else:
         corr = "xx"
 
@@ -372,13 +381,24 @@ def resolve_corr(args, config):
 
 
 def resolve_min_elevation(args, config):
-    """The elevation cut: the flag, else the config's, else the horizon."""
+    """The elevation cut: the flag, else the config's trajectory min_elevation_deg, else the horizon."""
     if not args.elevation_cut:
         return None
     if args.min_elevation is not None:
         return float(args.min_elevation)
     if config is not None:
-        return config.get("rfi", {}).get("min_elevation")
+        from tabascal.schema import RunConfig, TrajectoryConfig
+
+        if isinstance(config, RunConfig):
+            traj_cfg = config.model.find_one(TrajectoryConfig)
+            return traj_cfg.min_elevation_deg if traj_cfg is not None else 0.0
+        # Plain dict fallback (e.g. saved config.yaml)
+        for entry in (config.get("model") or {}).get("components") or []:
+            if isinstance(entry, dict) and len(entry) == 1:
+                ((_, params),) = entry.items()
+                if isinstance(params, dict) and "min_elevation_deg" in params:
+                    return params["min_elevation_deg"]
+        return 0.0
 
     return 0.0
 
@@ -624,28 +644,40 @@ def _from_config(args, offset_fit=None):
     """
     from tabascal.config import TabConfig, load_config
     from tabascal.rfi_estimate import light_curves_from_config
+    from tabascal.schema import ConfigValidationError, TrajectoryConfig
     from tabascal.scripts._run_tabascal_impl import set_precision
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except ConfigValidationError as e:
+        raise SystemExit(f"Error: {e}") from None
     # The config owns the precision here; an explicit --precision overrides it
     # through the config itself, so there is still only one place it is set.
     if offset_fit is not None:
         precision = offset_fit.pop("precision")
         if args.precision is not None:
-            config.setdefault("model", {})["precision"] = precision
+            config.model.precision = precision
     set_precision(config)
 
     ms_path = resolve_ms_path(args, config)
-    config["data"]["ms_path"] = ms_path
-    config["data"]["data_col"] = resolve_data_col(args, config)
-    config["data"]["corr"] = resolve_corr(args, config)
+    config.data.ms_path = ms_path
+    config.data.data_col = resolve_data_col(args, config)
+    config.data.corr = resolve_corr(args, config)
     if args.freq is not None:
-        config["data"]["freq"] = args.freq
+        config.data.freq_hz = args.freq
+    traj_cfg = config.model.find_one(TrajectoryConfig)
     if args.extra_orbit_dir:
-        config["satellites"]["extra_orbit_dir"] = args.extra_orbit_dir
+        if traj_cfg is None:
+            raise SystemExit(
+                "--extra-orbit-dir was given, but model.components has no satellite "
+                "trajectory component to apply it to."
+            )
+        traj_cfg.extra_orbit_dir = args.extra_orbit_dir
     # The satellites are the config's own: -n/-np are refused alongside -c, since
     # both name them and there is no rule for which would win.
-    config["rfi"]["min_elevation"] = resolve_min_elevation(args, config)
+    min_el = resolve_min_elevation(args, config)
+    if traj_cfg is not None:
+        traj_cfg.min_elevation_deg = min_el
 
     # An MS with no usable noise column is not fatal here: the curves are still
     # measured, and come back unweighted and unscaled with nan errors, which is
@@ -656,7 +688,11 @@ def _from_config(args, offset_fit=None):
     # defaults: neither an unweighted likelihood nor a fully-masked satellite
     # has anything to fit.
     tab_config = TabConfig(
-        config, ms_path, require_noise=False, require_in_view=False
+        config,
+        ms_path,
+        require_noise=False,
+        require_in_view=False,
+        min_elevation=min_el,
     )
 
     vis = None
@@ -671,7 +707,7 @@ def _from_config(args, offset_fit=None):
 
         # The same checks and the same alignment the standalone residual goes
         # through: subtracting positionally would meet a full-band store with a
-        # config narrowed by data.freq and difference two different channels,
+        # config narrowed by data.freq_hz and difference two different channels,
         # and a store from another observation would be differenced at all.
         xds = xr.open_zarr(args.zarr)
         _check_zarr_identity(
@@ -679,7 +715,7 @@ def _from_config(args, offset_fit=None):
             args.zarr,
             len(np.asarray(tab_config.a1)),
             tab_config.times_mjd,
-            config["data"]["corr"],
+            config.data.corr,
         )
         model = _model_on_ms_channels(
             xds,
@@ -698,11 +734,11 @@ def _from_config(args, offset_fit=None):
     )
     if args.zarr:
         result["data_col"] = (
-            f"{config['data']['data_col']} - "
+            f"{config.data.data_col} - "
             f"{os.path.basename(str(args.zarr).rstrip('/'))}"
         )
 
-    return ms_path, result, config["data"]["data_col"]
+    return ms_path, result, config.data.data_col
 
 
 def _from_ms(args, offset_fit=None):

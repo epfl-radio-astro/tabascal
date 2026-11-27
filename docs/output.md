@@ -34,8 +34,8 @@ out_dir/
 
 `config.yaml` and `run.json` are written before the run reads anything, so a run that dies still says what it was:
 
-* `config.yaml` is the configuration the run used, with the base defaults merged in, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `rfi.est`, `gains.init`, `data.noise`, `ast.point_sources`, the orbit directory and NORAD ID file — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
-* `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the run's seed (`inference.seed`, 1 when unset), a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
+* `config.yaml` is the configuration the run used, validated with all schema defaults populated, the command-line flags applied and every input path — the MS, gain tables, truth zarr, `data.noise_jy`, and component input paths (`norad_ids_path`, `extra_orbit_dir`, `est`, `point_sources`) — made absolute. `data.out_dir` stays the parent, so `tabascal run -c <run>/config.yaml -n again` repeats the run into a new sibling directory.
+* `run.json` holds the command line, working directory, host, the versions of tabascal and the libraries that decide what it computes, the run's seed (`seed`, 1 when unset), a fingerprint of each input, and a `status`: `running` from the start, then `finished` or `failed` (with the error).
 
 The fingerprints are what let a later command say whether the inputs are still the ones the run read. A file below 64 MiB is recorded by its size and SHA-256, so a copy with the same contents still matches; a larger one by size and modification time. A directory — a gain table, a zarr — is recorded by the sizes and modification times of every file in it, and an orbit directory by its `*.json` files alone, which is all the orbit resolver reads from it. The MS is the exception: `tab2MS` writes columns into it, so its files change with every export. What is recorded instead is what the run read from it — the number of rows, the `TIME` column, the channel frequencies, the antennas and the correlations. `tab2MS` and `tabascal rfi-per-sat` recompute them and warn, naming the input, when one has changed.
 
@@ -250,13 +250,13 @@ per component — the real and imaginary parts separately, since a `complex64` c
 
 **The scale is the per-sample, per-source values, taken before the sample mean**, because that is where the rounding happens. Referencing it to the columns instead would not be a bound at all: two samples of `+A` and `−A` average to a column of exactly zero while the total was rounded from `A`, so the columns can be zero and the difference nowhere near it. For a MAP run — one sample — the two readings coincide, but the guarantee is the one above.
 
-**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` with `rfi.backend: jax` sums the sources at each fine sample and loses the `1`; the `ffi` backends and the variable kernels accumulate source-major on that input and lose nothing).
+**The decomposition's own re-association**, which is the hypothesis above and has *no* bound in these coarse values. The RFI-visibility op reduces over source *and* integration sample together; evaluating it one satellite at a time splits that single reduction into per-source partial sums. The difference is bounded by the **fine-grid** terms behind each visibility, not by the coarse values they average to, and where the fine grid cancels the two are nothing like each other: a source whose fine samples are `[A, −A]` beside one whose are `[1, 0]` gives a joint evaluation of exactly `0` and per-source values summing to exactly `0.5` — a difference equal to the whole coarse visibility. Whether it happens at all depends on the kernel's accumulation order (`RiemannVisFine` with `backend: jax` sums the sources at each fine sample and loses the `1`; the `ffi` backends and the variable kernels accumulate source-major on that input and lose nothing).
 
 On fitted grids it is round-off: measured at ~2e-16 relative in double precision and ~6e-8 in single. Treat the sum-back as an exact identity that floating point perturbs, rather than as a guarantee with a number on it, and read a large discrepancy as what it usually is — a dropped source or a column in the wrong frame, which are orders of magnitude larger again — before suspecting cancellation.
 
 A satellite is named by its NORAD id, so a run that somehow fitted the same satellite twice is refused rather than writing one column per *pair* of sources. Sources the sharding padded the list with are not written at all: they carry no signal and name no satellite.
 
-Note that a run narrowed to one channel with `data.freq` is refused here too — the results then cover part of the MS's band, and nothing in them says which part.
+Note that a run narrowed to one channel with `data.freq_hz` is refused here too — the results then cover part of the MS's band, and nothing in them says which part.
 
 ### Zero and non-finite gains
 
@@ -267,7 +267,7 @@ An unflagged dead antenna can be driven to a zero or non-finite gain by the fit.
 Writing raises a `ValueError`, before any column is built, if:
 
 * the results `.zarr` holds a different number of baselines than the MS — the results belong to another MS, or an antenna was dropped between the run and the write;
-* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
+* the results `.zarr` holds a different number of channels than the MS. A run narrowed with [`data.freq_hz`](config.md) covers part of the MS's band. The results do record which part — the `freq` coordinate holds the channel frequencies the run was fitted on — but the writer does not yet use it to place a partial band on the MS's channel axis, so writing a narrowed run back to a full-band MS is not yet supported, the initial-prediction export included;
 * the MS rows are not ordered time-major, so the first `n_bl` rows do not hold `n_bl` distinct antenna pairs;
 * the baseline order differs between timesteps, which the `(n_time, n_bl)` reshape tabascal reads visibilities with cannot represent;
 * the rows interleave timesteps within a block of `n_bl` rows, which reshapes cleanly but puts every visibility on the wrong timestamp.
@@ -353,7 +353,7 @@ a run to have happened first. A run that reads one fingerprints it like any
 other input.
 
 `tabascal light-curve` writes one `.npz` to
-`<ms_dir>/light_curves/<tag or column>.npz` in the `rfi.est` interchange format,
+`<ms_dir>/light_curves/<tag or column>.npz` in the RFI `est` interchange format,
 so it can seed a later run unchanged. Scoring a run's residual with `-z <run
 directory>` is the exception: those curves describe the run, and go to
 `<run>/light_curves/`. With `--fit-offset` the along-track offset
@@ -366,7 +366,7 @@ column>` unless `-o` says otherwise:
 | file | when |
 | --- | --- |
 | `<stem>_ranking.npz` | always — the ranking table, every candidate |
-| `<stem>_config.yaml` | always — the `satellites` section, ready to merge |
+| `<stem>_config.yaml` | always — the `trajectory.FixedOrbit` component snippet, ready to merge |
 | `<stem>_light_curves.npz` | for the satellites that were named |
 | `<stem>_shifted_tles/` | for the satellites that were named |
 | `<stem>_ranking.png`, `<stem>_offset_<norad>.png` | with `-p` |

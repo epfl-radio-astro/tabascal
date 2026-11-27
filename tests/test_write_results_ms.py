@@ -146,7 +146,7 @@ def _write_zarr(
 
     n_bl = ast.shape[1]
     # Taken from the arrays rather than fixed at the module's counts, so a run
-    # narrowed with data.freq -- fewer channels in the results than in the MS --
+    # narrowed with data.freq_hz -- fewer channels in the results than in the MS --
     # is built by the same helper as a full-band one.
     n_freq = ast.shape[2]
 
@@ -1612,7 +1612,7 @@ class TestBaselineCountGuard:
 
 
 class TestChannelCountGuard:
-    """A run narrowed with ``data.freq`` reaches a refusal, not a reshape.
+    """A run narrowed with ``data.freq_hz`` reaches a refusal, not a reshape.
 
     The results then cover part of the MS's band. Which part is not what is
     missing -- the zarr's ``freq`` coordinate records the fitted channels -- the
@@ -1642,7 +1642,7 @@ class TestChannelCountGuard:
         # Both counts, and the limitation named as one: an export that is not
         # supported yet reads differently from a zarr that is simply wrong.
         assert "1 channels" in message and "has 2" in message
-        assert "data.freq" in message
+        assert "data.freq_hz" in message
         assert "not yet supported" in message
         # And named accurately. The zarr does say which channels were fitted;
         # the writer is what does not yet place them, and a message blaming the
@@ -2787,10 +2787,11 @@ class TestWriteResultsXdsRecordsTheCorrelation:
 
     @pytest.fixture
     def tab_config(self):
-        """The three attributes write_results_xds reads off the config."""
+        """The attributes write_results_xds reads off the config."""
+        from tabascal.schema import validate_config
 
         class _Config:
-            args = {"data": {"corr": "yx"}}
+            config = validate_config({"model": {"components": []}, "data": {"corr": "yx"}})
             times = np.arange(N_TIME, dtype=float)
             freqs = np.linspace(1.0e9, 1.1e9, N_FREQ)
 

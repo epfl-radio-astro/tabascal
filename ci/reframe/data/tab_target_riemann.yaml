@@ -1,15 +1,36 @@
 model:
   precision: single
   components:
-    - trajectory:FixedOrbitFine
-    - rfi_signal:ComplexRFIVarAntFine
-    - rfi_vis:RiemannVisFine
-    - ast_vis:GPVisAst
-    - gains:UnitaryGains
+    - trajectory.FixedOrbitFine:
+        norad_ids_path: starlink_selected_ids.txt
+        extra_orbit_dir: orbits
+    - rfi_signal.ComplexRFIVarAntFine:
+        init: truth
+        mean: zeros
+        cutoff: 1.0e-6
+        std_jy: max_vis
+        corr_freq_hz: 1.0e9
+        corr_time_s: 38
+        gammas: [5, 5]
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+    - rfi_vis.RiemannVisFine:
+        n_int_freq: 1
+    - ast_vis.GPVisAst:
+        init: truth
+        mean: zeros
+        cutoff: 1.0e-6
+        std_jy: data
+        corr_freq_hz: 1.0e9
+        fov_deg: 3.1
+        gammas: [5, 5]
+        freq_pad_factor: 2.0
+        time_pad_factor: 2.0
+    - gains.UnitaryGains
 
 data:
   data_col: DATA
-  noise: null
+  noise_jy: null
 
 plots:
   init: false
@@ -18,47 +39,8 @@ plots:
   opt: false
   losses: false
 
-inference:
-  opt: true
 
 opt:
   epsilon: 1.0e-3
   max_iter: 500
-  dual_run: false
-  guide: map
   trace_path: null
-
-ast:
-  init: truth
-  mean: 0
-  cutoff: 1.0e-6
-  gp_cov:
-    std: data
-    corr_freq: 1.0e9     # was pow_spec.k0_freq = 1 / (2 pi * 1e9)
-    fov_deg: 3.1
-    gammas: [5, 5]
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-
-rfi:
-  init: truth
-  mean: 0
-  cutoff: 1.0e-6
-  gp_cov:
-    std: null
-    corr_freq: 1.0e9
-    corr_time: 38
-    gammas: [5, 5]
-  freq_pad_factor: 2.0
-  time_pad_factor: 2.0
-  n_int_freq: 1
-
-satellites:
-  norad_ids_path: starlink_selected_ids.txt
-  extra_orbit_dir: orbits
-
-gains:
-  amp_mean: 1.0
-  phase_mean: 0.0
-  amp_std: 1.0
-  phase_std: 1.0

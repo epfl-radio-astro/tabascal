@@ -209,11 +209,12 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
     out = jax.jit(f)({"rfi_A": A_s})
     assert out["rfi_A"].sharding.spec == P("rfi")
 
-    # A fresh optimiser state is placed as _map_step returns it, and dual_run's
-    # second phase only changes a state leaf, so the fit compiles its step once.
+    # A fresh optimiser state is placed as _map_step returns it, so a step
+    # schedule compiles its step once across the drop.
     import numpyro
     import numpyro.distributions as nd
     from tabascal import tab_tools
+    from tabascal.opt_schedule import validate_schedule
 
     def model(obs_data=None, state=None, constants=None):
         x = numpyro.sample("rfi_k_r_base", nd.Normal(jnp.zeros((n_rfi, 3)), 1.0))
@@ -221,8 +222,11 @@ _MULTI_DEVICE_SCRIPT = textwrap.dedent(
 
     params = dist.shard_pytree({"rfi_k_r_base": np.ones((n_rfi, 3))}, n_rfi)
     obs = dist.make_global(np.zeros(3), dist.replicated_sharding())
-    tab_tools.run_custom_svi(model, obs, max_iter=2, init_params=params, epsilon=0.1,
-                             dual_run=True, state={}, constants={})
+    tab_tools.run_custom_svi(
+        model, obs, max_iter=2, init_params=params, epsilon=0.1,
+        schedule=validate_schedule({"kind": "step", "boundaries": [1]}, 2),
+        state={}, constants={},
+    )
     assert tab_tools._map_step._cache_size() == 1
 
     # Predictions: per-RFI sites stay split (after the sample axis), the rest replicated

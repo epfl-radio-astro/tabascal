@@ -43,34 +43,59 @@ def prepare_config(template: Path, components=None, precision=None, rfi_backend=
                    max_iter=None) -> dict:
     """The tabascal config to run: ``template`` with the given settings replaced.
 
-    A setting left as None keeps the template's. An input the template names by a
-    relative path that exists beside it (``satellites.norad_ids_path``, say) is
-    made absolute, since tabascal resolves inputs against the working directory
-    and the run starts in ReFrame's stage directory.
+    A setting left as None keeps the template's. Relative input paths that exist
+    beside the template (in ``data`` or any component entry) are made absolute,
+    since tabascal resolves inputs against the working directory and the run
+    starts in ReFrame's stage directory.
     """
-    # tabascal's loader, so bare scientific-notation floats parse as floats.
     from tabascal.config import yaml_load
-    from tabascal.run_dir import INPUT_KEYS
+    from tabascal.run_dir import _iter_input_slots
 
     template = Path(template)
     config = yaml_load(template)
-    for section, key in INPUT_KEYS:
-        block = config.get(section) or {}
-        value = block.get(key)
-        if isinstance(value, str) and value and not Path(value).is_absolute():
+
+    for _slot_id, _label, value, meta, setter in _iter_input_slots(config):
+        non_paths = meta.get("non_path_literals", ())
+        if isinstance(value, str) and value and value not in non_paths and not Path(value).is_absolute():
             path = template.parent / value
             if path.exists():
-                block[key] = str(path.resolve())
+                setter(str(path.resolve()))
 
     model = config.setdefault("model", {})
     if components is not None:
-        model["components"] = list(components)
+        # Preserve parameter blocks for matching component refs where possible.
+        existing = {}
+        for entry in model.get("components") or []:
+            if isinstance(entry, dict) and len(entry) == 1:
+                ((k, v),) = entry.items()
+                existing[k.replace(":", ".")] = v
+        new_comps = []
+        for raw_ref in components:
+            ref = str(raw_ref).strip().replace(":", ".")
+            if ref in existing and existing[ref] is not None:
+                new_comps.append({ref: existing[ref]})
+            else:
+                new_comps.append(ref)
+        model["components"] = new_comps
     if precision is not None:
         model["precision"] = precision
     if max_iter is not None:
         config.setdefault("opt", {})["max_iter"] = max_iter
     if rfi_backend is not None:
-        config.setdefault("rfi", {})["backend"] = rfi_backend
+        comps = model.get("components") or []
+        for i, entry in enumerate(comps):
+            if isinstance(entry, str):
+                ref, params = entry, None
+            elif isinstance(entry, dict) and len(entry) == 1:
+                ((ref, params),) = entry.items()
+            else:
+                continue
+            mod = ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1]
+            if mod == "rfi_vis":
+                params = dict(params) if isinstance(params, dict) else {}
+                params["backend"] = rfi_backend
+                comps[i] = {ref: params}
+                break
     return config
 
 
@@ -95,7 +120,7 @@ def main():
     parser.add_argument(
         "--rfi-backend",
         default=None,
-        help="rfi.backend of the rfi_vis component: jax or ffi (default: the component's)",
+        help="backend of the rfi_vis component: jax or ffi (default: the component's)",
     )
     parser.add_argument(
         "--workdir", required=True, help="Working directory for output files"

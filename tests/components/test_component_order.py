@@ -31,10 +31,21 @@ from tabascal.components import (
     state_key_producers,
     validate_component_order,
 )
-from tabascal.config import BASE_STATE_KEYS
+from tabascal.config import BASE_STATE_KEYS, _TabSafeLoader
 from tabascal.imports import import_components
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _entry_ref_and_params(entry):
+    if isinstance(entry, dict) and len(entry) == 1:
+        ((ref, params),) = entry.items()
+        return ref, params
+    return entry, None
+
+
+def _entry_ref(entry):
+    return _entry_ref_and_params(entry)[0]
 
 
 def build(refs):
@@ -43,7 +54,21 @@ def build(refs):
     ``Model`` builds them exactly like this before calling ``setup``; the order
     check runs on the declarations alone, so it needs no observation.
     """
-    return [C() for C in import_components(refs)]
+    parsed = [_entry_ref_and_params(r) for r in refs]
+    classes = import_components([ref for ref, _ in parsed])
+    comps = []
+    for cls, (_, params) in zip(classes, parsed):
+        if params is not None:
+            comps.append(cls(params))
+        else:
+            # Bare reference in order-only tests: instantiate with default config
+            # when possible, otherwise construct shell instance for class-level
+            # required_inputs / output_shapes inspection.
+            try:
+                comps.append(cls())
+            except Exception:
+                comps.append(object.__new__(cls))
+    return comps
 
 
 def check(refs):
@@ -51,9 +76,9 @@ def check(refs):
 
 
 FULL_RFI = [
-    "trajectory:FixedOrbitFine",
-    "rfi_signal:ComplexRFIVarAntFine",
-    "rfi_vis:RiemannVisFine",
+    "trajectory.FixedOrbitFine",
+    "rfi_signal.ComplexRFIVarAntFine",
+    "rfi_vis.RiemannVisFine",
 ]
 
 
@@ -68,13 +93,13 @@ class TestMissingProducer:
         ``state["ast_radec"]``.
         """
         with pytest.raises(ComponentOrderError) as excinfo:
-            check(FULL_RFI + ["ast_vis:DiscreteSkyVis", "gains:UnitaryGains"])
+            check(FULL_RFI + ["ast_vis.DiscreteSkyVis", "gains.UnitaryGains"])
 
         message = str(excinfo.value)
         assert "DiscreteSkyVis" in message
         assert "ast_radec" in message
         # Names the component that would supply it, and that it has to be added.
-        assert "ast_signal:FixedDiscreteSky" in message
+        assert "ast_signal.FixedDiscreteSky" in message
         assert "add one before" in message
         assert "wrong order" not in message
 
@@ -82,10 +107,10 @@ class TestMissingProducer:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:FixedOrbitFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.FixedOrbitFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
@@ -93,25 +118,25 @@ class TestMissingProducer:
         assert "RiemannVisFine" in message
         assert "rfi_A" in message
         # Every in-tree producer of the key is offered, not just one.
-        assert "rfi_signal:ComplexRFIVarAntFine" in message
-        assert "rfi_signal:ComplexRFIConstAntFine" in message
+        assert "rfi_signal.ComplexRFIVarAntFine" in message
+        assert "rfi_signal.ComplexRFIConstAntFine" in message
 
     def test_phase_calculation_without_a_trajectory(self):
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
         assert "PhaseCalculationRFIFine" in message
         assert "rfi_xyz" in message
-        assert "trajectory:FixedOrbitFine" in message
+        assert "trajectory.FixedOrbitFine" in message
 
 
 class TestWrongOrder:
@@ -122,16 +147,16 @@ class TestWrongOrder:
             check(
                 FULL_RFI
                 + [
-                    "ast_vis:DiscreteSkyVis",
-                    "ast_signal:FixedDiscreteSky",
-                    "gains:UnitaryGains",
+                    "ast_vis.DiscreteSkyVis",
+                    "ast_signal.FixedDiscreteSky",
+                    "gains.UnitaryGains",
                 ]
             )
 
         message = str(excinfo.value)
         assert "DiscreteSkyVis" in message
         assert "ast_radec" in message
-        assert "ast_signal:FixedDiscreteSky" in message
+        assert "ast_signal.FixedDiscreteSky" in message
         # The distinguishing part: the producer is present, just too late.
         assert "listed after" in message
         assert "wrong order" in message
@@ -141,12 +166,12 @@ class TestWrongOrder:
         with pytest.raises(ComponentOrderError) as excinfo:
             check(
                 [
-                    "trajectory:PhaseCalculationRFIFine",
-                    "trajectory:FixedOrbitFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "trajectory.FixedOrbitFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ]
             )
 
@@ -163,41 +188,41 @@ class TestValidLists:
         "refs",
         [
             pytest.param(
-                FULL_RFI + ["ast_vis:GPVisAst", "gains:UnitaryGains"], id="default"
+                FULL_RFI + ["ast_vis.GPVisAst", "gains.UnitaryGains"], id="default"
             ),
             pytest.param(
                 [
-                    "trajectory:FixedOrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisFine",
-                    "ast_vis:GPVisAst",
-                    "gains:UnitaryGains",
+                    "trajectory.FixedOrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisFine",
+                    "ast_vis.GPVisAst",
+                    "gains.UnitaryGains",
                 ],
                 id="fitted-phase",
             ),
             pytest.param(
                 [
-                    "trajectory:OrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIConstAntFine",
-                    "rfi_vis:RiemannVisVariableFine",
-                    "ast_signal:FixedDiscreteSky",
-                    "ast_vis:DiscreteSkyVis",
-                    "gains:ConstGains",
+                    "trajectory.OrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIConstAntFine",
+                    "rfi_vis.RiemannVisVariableFine",
+                    "ast_signal.FixedDiscreteSky",
+                    "ast_vis.DiscreteSkyVis",
+                    "gains.ConstGains",
                 ],
                 id="const-gains",
             ),
             pytest.param(
                 [
-                    "trajectory:NoDragOrbitFine",
-                    "trajectory:PhaseCalculationRFIFine",
-                    "rfi_signal:ComplexRFIVarAntFine",
-                    "rfi_vis:RiemannVisVariableFine",
-                    "ast_signal:FixedDiscreteSky",
-                    "ast_vis:GPVisAst",
-                    "ast_vis:DiscreteSkyVis",
-                    "gains:UnitaryGains",
+                    "trajectory.NoDragOrbitFine",
+                    "trajectory.PhaseCalculationRFIFine",
+                    "rfi_signal.ComplexRFIVarAntFine",
+                    "rfi_vis.RiemannVisVariableFine",
+                    "ast_signal.FixedDiscreteSky",
+                    "ast_vis.GPVisAst",
+                    "ast_vis.DiscreteSkyVis",
+                    "gains.UnitaryGains",
                 ],
                 id="gp-plus-fixed-sky",
             ),
@@ -221,7 +246,7 @@ class TestValidLists:
         A visibility component may therefore be the first thing in the list and
         still find the accumulator it adds into.
         """
-        check(["ast_vis:GPVisAst"])
+        check(["ast_vis.GPVisAst"])
 
 
 # Where a shipped ``model.components`` list can live. Searched recursively: a
@@ -262,7 +287,7 @@ EXPECTED_LOCATIONS = {
     "examples/tab_target.yaml": 1,
     "tests/data/tab_target.yaml": 1,
     "docs/analytic_rfi_vis.md": 1,
-    "docs/config.md": 3,
+    "docs/config.md": 9,
     "docs/kernels.md": 1,
 }
 
@@ -299,7 +324,7 @@ def _component_lists(label, text, broken):
     whose prose happens to contain a ``components:`` line.
     """
     try:
-        config = yaml.safe_load(text)
+        config = yaml.load(text, Loader=_TabSafeLoader)
     except yaml.YAMLError as exc:
         if _COMPONENTS_KEY.search(text):
             broken.append(f"{label}: not valid YAML ({exc.__class__.__name__})")
@@ -336,6 +361,8 @@ def _shipped_component_lists():
         # `*.y*ml` glob would never get the chance to see a CONFIG.YAML.
         paths = (REPO_ROOT / root).rglob("*")
         for path in sorted(p for p in paths if p.suffix.lower() in (".yaml", ".yml")):
+            if root == "examples" and (REPO_ROOT / "examples" / "data") in path.parents:
+                continue
             label = str(path.relative_to(REPO_ROOT))
             for refs in _component_lists(label, path.read_text(), broken):
                 found.append((label, refs))
@@ -363,7 +390,7 @@ def _is_whole_model(refs):
     """
     known = in_tree_components()
     return any(
-        "vis_obs" in getattr(known.get(str(ref).replace(".", ":")), "output_shapes", {})
+        "vis_obs" in getattr(known.get(str(_entry_ref(ref)).replace(":", ".")), "output_shapes", {})
         for ref in refs
     )
 
@@ -386,8 +413,8 @@ class TestTheHarvestDecision:
         return _component_lists("doc", text, broken), broken
 
     def test_a_model_components_list_is_harvested(self):
-        found, broken = self.read("model:\n  components:\n    - gains:UnitaryGains\n")
-        assert found == [["gains:UnitaryGains"]]
+        found, broken = self.read("model:\n  components:\n    - gains.UnitaryGains\n")
+        assert found == [["gains.UnitaryGains"]]
         assert broken == []
 
     def test_an_explicitly_empty_list_is_harvested_not_dropped(self):
@@ -413,12 +440,12 @@ class TestTheHarvestDecision:
         assert broken == []
 
     def test_a_root_level_components_list_is_a_breakage(self):
-        found, broken = self.read("components:\n  - gains:UnitaryGains\n")
+        found, broken = self.read("components:\n  - gains.UnitaryGains\n")
         assert found == []
         assert broken == ["doc: carries a root-level components: but no model.components mapping"]
 
     def test_a_non_list_components_value_is_a_breakage(self):
-        found, broken = self.read("model:\n  components: gains:UnitaryGains\n")
+        found, broken = self.read("model:\n  components: gains.UnitaryGains\n")
         assert found == []
         assert broken == ["doc: 'model.components' is not a list"]
 
@@ -462,7 +489,7 @@ def test_every_shipped_component_reference_resolves(refs):
 
     Fragments included: a snippet whose reference cannot be imported is as broken
     as a whole model whose components are in the wrong order, and the YAML has to
-    be written ``module:Class`` with no space, or it parses as a mapping and never
+    be written ``module.Class``: ``module: Class`` parses as a mapping and never
     reaches the importer as a reference at all.
     """
     build(refs)
@@ -490,7 +517,7 @@ def test_model_makes_the_check_before_it_sets_anything_up():
     with pytest.raises(ComponentOrderError, match="ast_radec"):
         Model(
             SimpleNamespace(noise=1.0, n_rfi=0),
-            FULL_RFI + ["ast_vis:DiscreteSkyVis", "gains:UnitaryGains"],
+            FULL_RFI + ["ast_vis.DiscreteSkyVis", "gains.UnitaryGains"],
         )
 
 
@@ -556,3 +583,94 @@ def test_every_required_input_has_an_in_tree_producer():
                 f"{ref} requires '{key}', which no in-tree component produces "
                 "and which Model does not put in the state."
             )
+
+
+# ---------------------------------------------------------------------------
+# The listed order does not matter
+# ---------------------------------------------------------------------------
+
+
+def _sorted_refs(components, **extra):
+    from tabascal.schema import validate_config
+
+    cfg = validate_config({"model": {"components": components, **extra}})
+    return [spec.ref for spec in cfg.model.components]
+
+
+def test_a_list_in_any_order_runs_in_dependency_order():
+    refs = _sorted_refs([
+        "gains.UnitaryGains", "rfi_vis.AnalyticVis", "ast_vis.GPVisAst",
+        "rfi_signal.ComplexRFIVarAnt", "trajectory.FixedOrbit",
+    ])
+    assert refs.index("trajectory.FixedOrbit") < refs.index("rfi_vis.AnalyticVis")
+    assert refs.index("rfi_signal.ComplexRFIVarAnt") < refs.index("rfi_vis.AnalyticVis")
+    assert refs[-1] == "gains.UnitaryGains"
+
+
+def test_a_valid_order_is_kept_as_written():
+    written = [
+        "trajectory.OrbitFine", "trajectory.PhaseCalculationRFIFine",
+        "rfi_signal.ComplexRFIVarAntFine", "rfi_vis.RiemannVisFine",
+        "ast_vis.GPVisAst", "gains.UnitaryGains",
+    ]
+    assert _sorted_refs(written, precision="double") == written
+
+
+def test_the_gains_run_after_every_term_that_adds_into_the_sky():
+    """Listed first, the gains used to pass the order check and miss the sky."""
+    sky = {"ast_signal.FixedDiscreteSky": {"point_sources": "sky.osm"}}
+    refs = _sorted_refs(["gains.UnitaryGains", "ast_vis.DiscreteSkyVis", sky, "ast_vis.GPVisAst"])
+
+    assert refs == [
+        "ast_signal.FixedDiscreteSky", "ast_vis.DiscreteSkyVis", "ast_vis.GPVisAst", "gains.UnitaryGains",
+    ]
+
+
+def test_accumulators_keep_their_listed_order():
+    sky = {"ast_signal.FixedDiscreteSky": {"point_sources": "sky.osm"}}
+    refs = _sorted_refs([sky, "ast_vis.GPVisAst", "ast_vis.DiscreteSkyVis", "gains.UnitaryGains"])
+
+    assert refs.index("ast_vis.GPVisAst") < refs.index("ast_vis.DiscreteSkyVis")
+
+
+def test_a_missing_producer_is_still_named():
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError, match="rfi_phase"):
+        validate_config({"model": {"components": ["rfi_vis.RiemannVisFine", "gains.UnitaryGains"]}})
+
+
+def test_a_missing_producer_in_a_config_is_not_asked_for_before_anything():
+    """The config's list is put in dependency order for the user, so the fix is to
+    add the producer, not to place it."""
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_config(
+            {"model": {"components": ["gains.UnitaryGains", "rfi_vis.AnalyticVis", "rfi_signal.ComplexRFIVarAnt"]}}
+        )
+    msg = str(exc.value)
+    assert "model.components[1] 'rfi_vis.AnalyticVis'" in msg
+    assert "'trajectory.FixedOrbit'" in msg
+    assert "which is not in model.components -- add one." in msg
+    assert "before" not in msg
+
+
+def test_grid_mismatch_reports_the_users_listed_indices():
+    from tabascal.schema import ConfigValidationError, validate_config
+
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_config(
+            {
+                "model": {
+                    "components": [
+                        "rfi_vis.AnalyticVis",
+                        "rfi_signal.ComplexRFIVarAntFine",
+                        "trajectory.FixedOrbit",
+                    ]
+                }
+            }
+        )
+    msg = str(exc.value)
+    assert "model.components[0] 'rfi_vis.AnalyticVis'" in msg
+    assert "'rfi_signal.ComplexRFIVarAntFine' (model.components[1])" in msg

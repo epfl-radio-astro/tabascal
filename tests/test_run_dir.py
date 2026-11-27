@@ -1,7 +1,9 @@
 """Run directories: their creation, the record written into them, and reading one back."""
 
+import json
 import os
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -43,14 +45,22 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
     impl, tmp_path, monkeypatch, error
 ):
     """config.yaml and a running run.json exist before the work; the status follows it."""
+    from tabascal.schema import validate_config
+
     monkeypatch.chdir(tmp_path)
-    config = {
+    config = validate_config({
         "data": {"ms_path": "obs.ms", "gain_table": "flux.B"},  # recorded as a list
-        "rfi": {"est": "curves.npz"},
-        "gains": {"init": "prior"},
         "opt": {"trace_path": "trace.npz"},
-        "model": {},
-    }
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"norad_ids": [25544]}},
+                {"rfi_signal.ComplexRFIConstAnt": {"init": "est", "est": "curves.npz"}},
+                "rfi_vis.AnalyticVis",
+                "ast_vis.GPVisAst",
+                {"gains.ConstGains": {"init": "prior"}},
+            ]
+        },
+    })
     seen = {}
 
     def subtract(config, paths):
@@ -70,27 +80,43 @@ def test_the_record_is_written_first_and_closed_with_the_outcome(
             impl.tabascal_subtraction(config, None, name="t", log=False)
 
     data = seen["config"]["data"]
+    comps = seen["config"]["model"]["components"]
     assert seen["status"] == "running"
     assert data["ms_path"] == str(tmp_path / "obs.ms")
     assert data["gain_table"] == [str(tmp_path / "flux.B")]
-    assert seen["config"]["rfi"]["est"] == str(tmp_path / "curves.npz")
-    assert seen["config"]["gains"]["init"] == "prior"
+    assert comps[1]["rfi_signal.ComplexRFIConstAnt"]["est"] == str(tmp_path / "curves.npz")
+    assert comps[4]["gains.ConstGains"]["init"] == "prior"
     assert seen["config"]["opt"]["trace_path"] == os.path.join(seen["run_dir"], "trace.npz")
 
     record = run_dir_mod.read_record(seen["run_dir"])
     assert record["status"] == ("finished" if error is None else "failed")
-    assert set(record["inputs"]) == {"data.ms_path", "data.gain_table[0]", "rfi.est", "data.truth_zarr"}
+    assert set(record["inputs"]) == {
+        "data.ms_path",
+        "data.gain_table[0]",
+        "rfi_signal.ComplexRFIConstAnt.est",
+        "data.truth_zarr",
+    }
 
 
 @pytest.mark.parametrize("saved, resolved, expected", [("auto", 40.625, 40.625), (8.0, 8.0, 8.0)])
 def test_auto_time_padding_is_saved_as_the_factor_it_came_to(impl, tmp_path, saved, resolved, expected):
-    run_dir_mod.write_config(str(tmp_path), {"ast": {"time_pad_factor": saved}, "rfi": {}})
-    impl._record_resolved_settings(str(tmp_path), {"ast": {"time_pad_factor": resolved}})
+    run_dir_mod.write_config(
+        str(tmp_path),
+        {"model": {"components": [{"ast_vis.GPVisAst": {"time_pad_factor": saved}}]}},
+    )
+    resolved_dict = {"time_pad_factor": resolved} if saved == "auto" else {}
+    model_stub = SimpleNamespace(
+        components=[SimpleNamespace(resolved_options=lambda: resolved_dict)]
+    )
+    impl._record_resolved_settings(str(tmp_path), model_stub)
 
-    assert run_dir_mod.read_config(str(tmp_path)) == {"ast": {"time_pad_factor": expected}, "rfi": {}}
+    saved_cfg = run_dir_mod.read_config(str(tmp_path))
+    assert saved_cfg["model"]["components"][0]["ast_vis.GPVisAst"]["time_pad_factor"] == expected
 
 
 def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypatch):
+    from tabascal.schema import validate_config
+
     def broken(*args):
         raise OSError("disk full")
 
@@ -99,12 +125,18 @@ def test_a_failed_record_stops_the_run_before_it_starts(impl, tmp_path, monkeypa
 
     with pytest.raises(OSError, match="disk full"):
         impl.tabascal_subtraction(
-            {"data": {"ms_path": str(tmp_path / "o.ms")}, "model": {}}, None, name="t", log=False
+            validate_config({"data": {"ms_path": str(tmp_path / "o.ms")}, "model": {"components": []}}),
+            None, name="t", log=False,
         )
 
 
 def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
-    config = {"data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"}}
+    from tabascal.schema import validate_config
+
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms"), "data_col": "CORRECTED_DATA"},
+        "model": {"components": []},
+    })
 
     with pytest.raises(ValueError, match="replace the data the run read"):
         impl.tabascal_subtraction(config, str(tmp_path), name="t", log=False)
@@ -112,52 +144,145 @@ def test_a_run_that_would_write_over_its_input_never_starts(impl, tmp_path):
     assert not (tmp_path / "runs").exists()
 
 
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"extra_orbit_dir": "orbits"}, "--extra-orbit-dir"),
+        ({"norad_path": "ids.txt"}, "-np/--norad-path"),
+    ],
+)
+def test_orbit_cli_flags_require_a_trajectory_component(impl, tmp_path, kwargs, match):
+    from tabascal.schema import validate_config
+
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms")},
+        "model": {"components": ["ast_vis.GPVisAst"]},
+    })
+    with pytest.raises(SystemExit, match=match):
+        impl._resolve_paths(
+            config, str(tmp_path), None, "t",
+            extra_orbit_dir=kwargs.get("extra_orbit_dir"),
+            norad_path=kwargs.get("norad_path"),
+        )
+
+
+def test_orbit_cli_flags_override_the_trajectory_component(impl, tmp_path, monkeypatch):
+    from tabascal.schema import validate_config
+
+    monkeypatch.chdir(tmp_path)
+    config = validate_config({
+        "data": {"ms_path": str(tmp_path / "o.ms")},
+        "model": {"components": [{"trajectory.FixedOrbit": {"norad_ids": [25544]}}]},
+    })
+    impl._resolve_paths(
+        config, str(tmp_path), None, "t",
+        extra_orbit_dir="orbits",
+        norad_path="ids.txt",
+    )
+    traj = config.model.components[0].config
+    assert traj.extra_orbit_dir == str(tmp_path.resolve() / "orbits")
+    assert traj.norad_ids_path == str(tmp_path.resolve() / "ids.txt")
+
+
 def test_inputs_through_latest_are_resolved_once_and_shared(tmp_path, monkeypatch):
     """Rank 0 resolves latest to the earlier run; a worker arriving after it moved gets the same."""
     import tabascal.distributed as dist
 
     earlier = run_dir_mod.create_run_dir(str(tmp_path), "first")
-    via_latest = {"satellites": {"extra_orbit_dir": str(tmp_path / "runs" / "latest" / "results")}}
+    orbit_dir = str(tmp_path / "runs" / "latest" / "results")
     sent = {}
     broadcast = dist.broadcast_bytes_from_rank0
     monkeypatch.setattr(
         dist, "broadcast_bytes_from_rank0",
         lambda payload, name: sent.setdefault("payload", broadcast(payload, name)),
     )
-    rank0 = {"satellites": dict(via_latest["satellites"])}
+    rank0 = {"model": {"components": [{"trajectory.FixedOrbit": {"extra_orbit_dir": orbit_dir}}]}}
     run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
 
     # latest now names the new run, so a worker resolving for itself would differ.
     monkeypatch.setattr(dist, "is_process_0", lambda: False)
-    worker = {"satellites": dict(via_latest["satellites"])}
+    worker = {"model": {"components": [{"trajectory.FixedOrbit": {"extra_orbit_dir": orbit_dir}}]}}
 
     assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
-    assert worker == rank0 == {"satellites": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+    expected = {
+        "model": {
+            "components": [
+                {"trajectory.FixedOrbit": {"extra_orbit_dir": os.path.join(earlier, "results")}}
+            ]
+        }
+    }
+    assert worker == rank0 == expected
+
+
+def test_inline_point_sources_do_not_stop_the_run_directory(tmp_path, monkeypatch):
+    """An inline sky list is not a path: it is left alone, and the broadcast still encodes."""
+    import tabascal.distributed as dist
+    from tabascal.schema import validate_config
+
+    def make_config():
+        return validate_config({
+            "data": {"gain_table": "flux.B"},
+            "model": {
+                "components": [
+                    {"ast_signal.FixedDiscreteSky": {
+                        "point_sources": [{"name": "src", "ra_deg": 1.0, "dec_deg": 2.0, "I_jy": 3.0}],
+                    }},
+                ]
+            },
+        })
+
+    monkeypatch.chdir(tmp_path)
+    rank0 = make_config()
+    sources = rank0.model.components[0].config.point_sources
+    run = run_dir_mod.create_run_dir(str(tmp_path), "t", rank0)
+
+    assert os.path.isdir(run)
+    assert rank0.model.components[0].config.point_sources is sources
+    assert rank0.data.gain_table == [os.path.realpath(tmp_path / "flux.B")]
+
+    # A worker takes process 0's paths and keeps its own parse of the sky.
+    monkeypatch.setattr(dist, "is_process_0", lambda: False)
+    monkeypatch.setattr(
+        dist, "broadcast_bytes_from_rank0",
+        lambda payload, name: json.dumps(
+            {"run_dir": run, "inputs": run_dir_mod._input_values(rank0)}
+        ).encode(),
+    )
+    worker = make_config()
+    assert run_dir_mod.create_run_dir(str(tmp_path), "t", worker) == run
+    assert worker.data.gain_table == rank0.data.gain_table
+    assert worker.model.components[0].config.point_sources == sources
 
 
 @pytest.mark.parametrize(
-    "section, key, changed, warns",
+    "kind, owner, key, changed, warns",
     [
-        ("rfi", "est", "", True),  # a plain file
-        ("rfi", "est", "part", True),  # a directory
-        ("satellites", "extra_orbit_dir", "orbits.json", True),
+        ("component", "rfi_signal.ComplexRFIVarAnt", "est", "", True),  # a plain file
+        ("component", "rfi_signal.ComplexRFIVarAnt", "est", "part", True),  # a directory
+        ("component", "trajectory.FixedOrbit", "extra_orbit_dir", "orbits.json", True),
         # An earlier run's results/: tab2MS rewrites its .B, which no orbit reader reads.
-        ("satellites", "extra_orbit_dir", "map_pred.B/table.dat", False),
+        ("component", "trajectory.FixedOrbit", "extra_orbit_dir", "map_pred.B/table.dat", False),
     ],
 )
-def test_a_changed_input_is_named(tmp_path, section, key, changed, warns):
+def test_a_changed_input_is_named(tmp_path, kind, owner, key, changed, warns):
     path = tmp_path / "input"
     files = [path] if not changed else [path / "part", path / "orbits.json", path / "map_pred.B" / "table.dat"]
     for f in files:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("one")
-    record = {"inputs": run_dir_mod.fingerprint_inputs({section: {key: str(path)}})}
+    cfg = (
+        {"model": {"components": [{owner: {key: str(path)}}]}}
+        if kind == "component"
+        else {owner: {key: str(path)}}
+    )
+    record = {"inputs": run_dir_mod.fingerprint_inputs(cfg)}
 
     (path / changed if changed else path).write_text("three")
 
+    label = f"{owner}.{key}"
     if warns:
-        with pytest.warns(RuntimeWarning, match=rf"{section}\.{key}"):
-            assert run_dir_mod.check_inputs(record) == [f"{section}.{key}"]
+        with pytest.warns(RuntimeWarning, match=label.replace(".", r"\.")):
+            assert run_dir_mod.check_inputs(record) == [label]
     else:
         assert run_dir_mod.check_inputs(record) == []
 

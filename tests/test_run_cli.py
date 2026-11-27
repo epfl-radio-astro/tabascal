@@ -773,17 +773,18 @@ class TestLightCurveInputs:
 
     def test_the_flag_beats_the_config_for_the_elevation_cut(self):
         args = _parse("light-curve", "-c", "c.yaml", "--min-elevation", "20")
-        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 0}}) == 20.0
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 0}}]}}
+        assert self._mod().resolve_min_elevation(args, cfg) == 20.0
 
     def test_the_config_cut_is_used_when_the_flag_is_absent(self):
         args = _parse("light-curve", "-c", "c.yaml")
-        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 5}}) == 5
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 5}}]}}
+        assert self._mod().resolve_min_elevation(args, cfg) == 5
 
     def test_a_null_config_cut_stays_off(self):
         args = _parse("light-curve", "-c", "c.yaml")
-        assert self._mod().resolve_min_elevation(
-            args, {"rfi": {"min_elevation": None}}
-        ) is None
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": None}}]}}
+        assert self._mod().resolve_min_elevation(args, cfg) is None
 
     def test_the_manual_default_is_the_horizon(self):
         args = _parse("light-curve", "-ms", "o.ms", "-n", "1")
@@ -791,7 +792,8 @@ class TestLightCurveInputs:
 
     def test_no_elevation_cut_overrides_everything(self):
         args = _parse("light-curve", "-c", "c.yaml", "--no-elevation-cut")
-        assert self._mod().resolve_min_elevation(args, {"rfi": {"min_elevation": 5}}) is None
+        cfg = {"model": {"components": [{"trajectory.FixedOrbit": {"min_elevation_deg": 5}}]}}
+        assert self._mod().resolve_min_elevation(args, cfg) is None
 
     def test_the_output_defaults_beside_the_measurement_set(self):
         args = _parse("light-curve", "-ms", "/data/obs.ms", "-n", "1")
@@ -916,16 +918,21 @@ class TestResolveMSPath:
     """
 
     @staticmethod
-    def _resolve(impl, tmp_path, ms_path=None, config_ms_path=None):
-        config = {
-            "data": {"out_dir": str(tmp_path / "obs"), "ms_path": config_ms_path},
-            "model": {},
-        }
+    def _cfg(data):
+        from tabascal.schema import validate_config
+
+        return validate_config({"data": data, "model": {"components": []}})
+
+    @classmethod
+    def _resolve(cls, impl, tmp_path, ms_path=None, config_ms_path=None):
+        config = cls._cfg(
+            {"out_dir": str(tmp_path / "obs"), "ms_path": config_ms_path}
+        )
         paths = impl._resolve_paths(config, None, ms_path, "t", None)
         # The run reads the bundle; the config is written back so the run's
         # config.yaml records the MS the run actually used. They have to be the
         # one path or that record is a fiction.
-        assert config["data"]["ms_path"] == paths.ms_path
+        assert config.data.ms_path == paths.ms_path
         return paths.ms_path
 
     def test_the_config_names_the_ms(self, impl, tmp_path):
@@ -947,16 +954,15 @@ class TestResolveMSPath:
 
         assert resolved == str(tmp_path / "obs" / "obs.ms")
 
-    @pytest.mark.parametrize("empty", [None, ""])
-    def test_an_unset_config_key_falls_through(self, impl, tmp_path, empty):
-        """The base config ships ``ms_path`` as a bare key, so it arrives None."""
-        resolved = self._resolve(impl, tmp_path, config_ms_path=empty)
+    def test_an_unset_config_key_falls_through(self, impl, tmp_path):
+        """An unset ``ms_path`` (``null``) falls through to the simulation layout."""
+        resolved = self._resolve(impl, tmp_path, config_ms_path=None)
 
         assert resolved == str(tmp_path / "obs" / "obs.ms")
 
     def test_a_missing_config_key_falls_through(self, impl, tmp_path):
-        """A hand-written config need not carry every key of the base one."""
-        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
+        """A hand-written config need not carry every key."""
+        config = self._cfg({"out_dir": str(tmp_path / "obs")})
 
         paths = impl._resolve_paths(config, None, None, "t", None)
 
@@ -964,7 +970,7 @@ class TestResolveMSPath:
         # Recorded even when derived, so the run's config.yaml is a record of
         # the run and not of the intent -- which is why re-running one after
         # moving the data needs -ms.
-        assert config["data"]["ms_path"] == paths.ms_path
+        assert config.data.ms_path == paths.ms_path
 
     def test_a_relative_config_path_is_made_absolute(self, impl, tmp_path, monkeypatch):
         """As the flag already was: a run must not depend on its working dir."""
@@ -985,42 +991,38 @@ class TestResolveMSPath:
         in the output directory. ``-ms`` moves a run onto other visibilities.
         """
         named_ms = str(tmp_path / "elsewhere" / "real.ms")
-        config = {
-            "data": {"out_dir": str(tmp_path / "obs"), "ms_path": named_ms},
-            "model": {},
-        }
+        config = self._cfg({"out_dir": str(tmp_path / "obs"), "ms_path": named_ms})
 
         paths = impl._resolve_paths(config, str(tmp_path / "other"), None, "t", None)
 
         assert paths.ms_path == named_ms
-        assert config["data"]["out_dir"] == str(tmp_path / "other")
+        assert config.data.out_dir == str(tmp_path / "other")
         assert paths.plot_dir.startswith(str(tmp_path / "other"))
 
     def test_the_out_dir_flag_beats_the_config(self, impl, tmp_path):
         """It still wins for everything out_dir does name."""
-        config = {"data": {"out_dir": str(tmp_path / "from_config")}, "model": {}}
+        config = self._cfg({"out_dir": str(tmp_path / "from_config")})
 
         paths = impl._resolve_paths(config, str(tmp_path / "from_flag"), None, "t", None)
 
         assert paths.ms_path == str(tmp_path / "from_flag" / "from_flag.ms")
-        assert config["data"]["zarr_path"] == str(
+        assert config.data.truth_zarr == str(
             tmp_path / "from_flag" / "from_flag.zarr"
         )
 
     def test_the_truth_zarr_defaults_beside_the_ms(self, impl, tmp_path):
         """Named for the MS, which on a simulation is the directory's own name.
 
-        ``ast.init: truth``, ``rfi.init: truth`` and ``plots.truth`` read it,
+        ``init: truth`` and ``plots.truth`` read it,
         and a simulation is the only thing that has one -- ``sim-vis`` leaves it at
         ``<dir>/<dir name>.zarr`` beside the MS of the same stem, so deriving
         it from the MS's name reproduces that exactly.
         """
-        config = {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}
+        config = self._cfg({"out_dir": str(tmp_path / "obs")})
 
         impl._resolve_paths(config, None, None, "t", None)
 
-        assert config["data"]["truth_zarr"] == str(tmp_path / "obs" / "obs.zarr")
-        assert config["data"]["zarr_path"] == config["data"]["truth_zarr"]
+        assert config.data.truth_zarr == str(tmp_path / "obs" / "obs.zarr")
 
     def test_the_truth_zarr_follows_the_ms_not_the_outputs(self, impl, tmp_path):
         """sim-vis writes the MS and the truth together; only the products move.
@@ -1029,17 +1031,16 @@ class TestResolveMSPath:
         wrote into the simulation -- which is the assumption #207 is about, and
         the opposite of the split the docs recommend for a read-only archive.
         """
-        config = {
-            "data": {
+        config = self._cfg(
+            {
                 "out_dir": str(tmp_path / "scratch"),
                 "ms_path": str(tmp_path / "sim" / "pnt_src_obs.ms"),
-            },
-            "model": {},
-        }
+            }
+        )
 
         impl._resolve_paths(config, None, None, "t", None)
 
-        assert config["data"]["truth_zarr"] == str(
+        assert config.data.truth_zarr == str(
             tmp_path / "sim" / "pnt_src_obs.zarr"
         )
 
@@ -1056,7 +1057,7 @@ class TestResolveMSPath:
         try:
             with pytest.raises(SystemExit, match=r"-od/--out_dir"):
                 impl._resolve_paths(
-                    {"data": {"ms_path": str(archive / "obs.ms")}, "model": {}},
+                    self._cfg({"ms_path": str(archive / "obs.ms")}),
                     None,
                     None,
                     "t",
@@ -1073,18 +1074,17 @@ class TestResolveMSPath:
         is about.
         """
         truth = str(tmp_path / "sim" / "pnt_src_obs.zarr")
-        config = {
-            "data": {
+        config = self._cfg(
+            {
                 "out_dir": str(tmp_path / "scratch"),
                 "ms_path": str(tmp_path / "sim" / "pnt_src_obs.ms"),
                 "truth_zarr": truth,
-            },
-            "model": {},
-        }
+            }
+        )
 
         impl._resolve_paths(config, None, None, "t", None)
 
-        assert config["data"]["zarr_path"] == truth
+        assert config.data.truth_zarr == truth
 
     def test_a_real_data_run_derives_a_truth_zarr_that_simply_is_not_there(
         self, impl, tmp_path
@@ -1095,31 +1095,39 @@ class TestResolveMSPath:
         ``truth.py`` reads the key and a missing one would be a KeyError where
         an absent file is a printed line.
         """
-        config = {
-            "data": {"ms_path": str(tmp_path / "mwa" / "mwa_large_ch28.ms")},
-            "model": {},
-        }
+        config = self._cfg({"ms_path": str(tmp_path / "mwa" / "mwa_large_ch28.ms")})
 
         impl._resolve_paths(config, None, None, "t", None)
 
-        assert config["data"]["zarr_path"] == str(
+        assert config.data.truth_zarr == str(
             tmp_path / "mwa" / "mwa_large_ch28.zarr"
         )
-        assert not os.path.exists(config["data"]["zarr_path"])
+        assert not os.path.exists(config.data.truth_zarr)
 
 
 class TestResolvePathsRefusesWhatItCannotUse:
     """A message naming the key, rather than a traceback out of ``posixpath``.
 
-    Nothing type-checks the ``data`` section, and these two keys are the ones
-    that reach path arithmetic. ``os.path.abspath`` reports only the type it was
-    handed -- "expected str, bytes or os.PathLike object, not NoneType" names
-    neither the key nor the config it came from.
+    Defence in depth even if a caller constructs an unvalidated config stub
+    and hands it directly to ``_resolve_paths``.
     """
 
     @staticmethod
     def _resolve(impl, data):
-        return impl._resolve_paths({"data": data, "model": {}}, None, None, "t", None)
+        from tabascal.schema import ConfigValidationError, ModelConfig, validate_config
+
+        try:
+            cfg = validate_config({"data": data, "model": {"components": []}})
+        except ConfigValidationError:
+            cfg = SimpleNamespace(
+                data=SimpleNamespace(
+                    ms_path=data.get("ms_path"),
+                    out_dir=data.get("out_dir"),
+                    truth_zarr=data.get("truth_zarr"),
+                ),
+                model=ModelConfig(),
+            )
+        return impl._resolve_paths(cfg, None, None, "t", None)
 
     @pytest.mark.parametrize("data", [{}, {"out_dir": None}, {"out_dir": ""}])
     def test_naming_neither_the_ms_nor_the_directory_is_reported(self, impl, data):
@@ -1150,9 +1158,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
         """
         ms = tmp_path / "mwa" / "mwa_large_ch28.ms"
 
-        paths = impl._resolve_paths(
-            {"data": {"ms_path": str(ms)}, "model": {}}, None, None, "t", None
-        )
+        paths = self._resolve(impl, {"ms_path": str(ms)})
 
         assert paths.ms_path == str(ms)
         assert paths.plot_dir.startswith(str(tmp_path / "mwa"))
@@ -1160,13 +1166,7 @@ class TestResolvePathsRefusesWhatItCannotUse:
 
     def test_a_directory_alone_is_read_as_a_simulation(self, impl, tmp_path):
         """What ``sim_dir`` meant, unchanged, for the runs that were using it."""
-        paths = impl._resolve_paths(
-            {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}},
-            None,
-            None,
-            "t",
-            None,
-        )
+        paths = self._resolve(impl, {"out_dir": str(tmp_path / "obs")})
 
         assert paths.ms_path == str(tmp_path / "obs" / "obs.ms")
         assert paths.f_name == "obs"
@@ -1221,8 +1221,16 @@ class TestResolvePathsRefusesWhatItCannotUse:
 
 def test_every_results_file_the_run_names_is_documented(impl, tmp_path):
     """A resolved results path nothing wrote (``map_params_*.zarr``) had no entry here."""
+    from tabascal.schema import validate_config
+
     paths = impl._resolve_paths(
-        {"data": {"out_dir": str(tmp_path / "obs")}, "model": {}}, None, None, "t", None
+        validate_config(
+            {"data": {"out_dir": str(tmp_path / "obs")}, "model": {"components": []}}
+        ),
+        None,
+        None,
+        "t",
+        None,
     )
     results_dir = os.path.join(paths.run_dir, "results")
     named = {

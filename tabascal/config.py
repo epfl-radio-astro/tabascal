@@ -1,5 +1,9 @@
-from tabascal.imports import import_components
-from tabascal.components import rfi_grid, validate_component_order
+from tabascal.components import (
+    BASE_STATE_KEYS,
+    Component,
+    rfi_grid,
+    validate_component_order,
+)
 from tabascal.components.likelihood import gaussian
 from tabascal.distributed import (
     constrain_rfi_state,
@@ -22,8 +26,18 @@ from tabascal.components.trajectory import (
 )
 from tabascal.orbit import check_epoch_agreement, preflight_tle_check
 from tabascal.orbit_config import normalise_tle_config
-from tabascal.jitter import validate_init_jitter
-from tabascal.seeds import validate_seed, warn_deprecated_seeds
+from tabascal.schema import (
+    ComponentSpec,
+    ConfigValidationError,
+    FineTimeIntegrationMixin,
+    FreqIntegrationMixin,
+    RFIGPConfig,
+    RunConfig,
+    TrajectoryConfig,
+    VariableFineTimeIntegrationMixin,
+    _parse_component_entry,
+    validate_config,
+)
 from tabascal.interferometry import (
     baseline_gains,
     calculate_fringe_frequency_numpy,
@@ -39,51 +53,11 @@ import numpy as np
 
 import numpyro
 
-from typing import Optional, Callable, Dict, List
+from collections.abc import Mapping
+from typing import Any, Callable, Optional, Sequence, Union
 
-from importlib.resources import files
-import os
 import re
 import yaml
-import collections.abc
-
-    
-def deep_update(d: Dict, u: Dict) -> Dict:
-    """Recursively update a dictionary which includes subdictionaries.
-
-    An update value of ``None`` where the base holds a mapping is no update at
-    all: a yaml section header written with nothing under it (``rfi:``) parses
-    as ``None``, and taking that literally would drop every default the base
-    supplies under the section. A section therefore cannot be emptied by
-    setting it to null, at any depth.
-
-    A ``None`` anywhere else is a value like any other. It overrides a scalar,
-    which is what ``data.noise: null`` and ``rfi.min_elevation: null`` are for,
-    and under a key the base does not have — where there is no default to keep
-    — it is stored, as an unknown key of any other value would be.
-
-    Parameters
-    ----------
-    d : Dict
-        Base dictionary to update.
-    u : Dict
-        Update dictionary.
-
-    Returns
-    -------
-    Dict
-        Updated dictionary.
-    """
-    for k, v in u.items():
-        if isinstance(v, collections.abc.Mapping):
-            # A mapping over a null or scalar default replaces it.
-            base = d.get(k)
-            d[k] = deep_update(base if isinstance(base, collections.abc.Mapping) else {}, v)
-        elif v is None and isinstance(d.get(k), collections.abc.Mapping):
-            continue
-        else:
-            d[k] = v
-    return d
 
 
 class _TabSafeLoader(yaml.SafeLoader):
@@ -119,8 +93,8 @@ def yaml_load(path):
         return yaml.load(f, Loader=_TabSafeLoader)
 
 
-def load_config(path: str) -> Dict:
-    """Load a configuration file and populate default parameters where needed.
+def load_config(path: str) -> RunConfig:
+    """Load and validate a TABASCAL YAML configuration file.
 
     Parameters
     ----------
@@ -129,27 +103,23 @@ def load_config(path: str) -> Dict:
 
     Returns
     -------
-    dict
-        Configuration dictionary.
+    RunConfig
+        Validated configuration object with defaults populated from schemas.
     """
-    config_dir = files("tabascal").joinpath("data/config").__str__()
-    tab_base_config_path = os.path.join(config_dir, "tab_config_base.yaml")
-    base_config = yaml_load(tab_base_config_path)
-
     try:
-        config = deep_update(base_config, yaml_load(path))
+        raw = yaml_load(path)
     except Exception as e:
         raise IOError(f"Configuration file could not be loaded from {path}") from e
 
-    # Outside the try: a bad seed is a config to edit, not a file that failed to load.
-    validate_seed(config)
-    warn_deprecated_seeds(config)
-    validate_init_jitter((config.get("opt") or {}).get("init_jitter"))
-    return config
+    return validate_config(raw)
+
+
+#: ``TabConfig(min_elevation=...)`` left out: take the trajectory component's own.
+_FROM_MODEL = object()
 
 
 class TabConfig:
-    """Configuration parameters for tabascal method"""
+    """Observation data and resolved runtime configuration for TABASCAL."""
 
     # Minimum number of divisors required of the fine-grid size (n_int_time) when
     # binning per-baseline RFI sampling rates for the variable-sampling components.
@@ -158,21 +128,23 @@ class TabConfig:
 
     def __init__(
         self,
-        config: Dict,
+        config: Union[RunConfig, Mapping[str, Any]],
         ms_path: str,
         require_noise: bool = True,
         require_in_view: bool = True,
+        min_elevation=_FROM_MODEL,
     ):
-
-        self.args = config
-        # load_config has already done this for a config read from a file.
-        warn_deprecated_seeds(config)
-        self.precision = config.get("model", {}).get("precision", "single")
+        cfg = validate_config(config)
+        self.config: RunConfig = cfg
+        self.precision = cfg.model.precision
+        self.seed = cfg.seed
         self.ms_path = ms_path
-        # One normalisation of the satellites section, shared by preflight and the
-        # model build, so a malformed value is a clean error and the two can never
-        # disagree about what was configured.
-        self.tle_config = normalise_tle_config(config)
+
+        traj_cfg = cfg.model.find_one(TrajectoryConfig)
+        # One normalisation of the trajectory component's orbit settings, shared by
+        # preflight and the model build, so a malformed value is a clean error and
+        # the two can never disagree about what was configured.
+        self.tle_config = normalise_tle_config(cfg)
         self.extra_orbit_dir = self.tle_config.extra_orbit_dir
         self.extra_orbit_max_age_days = self.tle_config.extra_orbit_max_age_days
 
@@ -182,11 +154,11 @@ class TabConfig:
         self.tle_resolution = preflight_tle_check(self.tle_config, ms_path)
 
         self.read_ms_params(
-            config["data"]["freq"],
-            config["data"]["corr"],
-            config["data"]["data_col"],
+            cfg.data.freq_hz,
+            cfg.data.corr,
+            cfg.data.data_col,
         )
-        self.set_noise(config["data"]["noise"], require=require_noise)
+        self.set_noise(cfg.data.noise_jy, require=require_noise)
         # After set_noise, so the noise it resolved is carried into the
         # calibrated frame with the data; before set_flags, so the samples no
         # gain could be found for reach the flags; and before the sharding block
@@ -195,8 +167,8 @@ class TabConfig:
         # apply_gain_table leaves that alone: the data are still calibrated and
         # the uncalibratable samples still flagged, there is simply no error bar
         # to divide by the gain.
-        self.apply_gain_table(config["data"].get("gain_table"))
-        self.set_flags(config["data"]["flags"])
+        self.apply_gain_table(cfg.data.gain_table)
+        self.set_flags(cfg.data.exclude_flagged)
 
         # The MS read must land on the same observation epoch preflight resolved
         # against, or the model would be built from TLEs checked at another time.
@@ -209,34 +181,45 @@ class TabConfig:
 
         # Only the frequency count is a free choice: there is no observable to
         # derive it from. n_int_time is set by estimate_rfi_sampling below, from
-        # the fringe rate the RFI sampling has to follow -- it is not a config
-        # key, and rfi.time_int_factor is how a config scales it.
-        self.n_int_freq = config["rfi"]["n_int_freq"]
+        # the fringe rate the RFI sampling has to follow -- it is not an option,
+        # and the fine-grid rfi_vis component's time_int_factor is how a config
+        # scales it.
+        vis_cfg = cfg.model.find_one(FreqIntegrationMixin)
+        self.n_int_freq = vis_cfg.n_int_freq if vis_cfg is not None else 1
 
         # The divisor-rich fine grid (min_divisors > 1) is only needed by the
-        # RiemannVisVariableFine component (either backend), which
-        # splits baselines into multiple stride groups. For every other rfi_vis
-        # component it just
-        # inflates n_int_time (the fine-grid time dimension) and slows the run,
-        # so only request it when a Variable component is actually selected.
-        # min_divisors is an internal tuning parameter, not user-configurable.
-        uses_variable = any(
-            "Variable" in comp for comp in config["model"]["components"]
-        )
+        # RiemannVisVariableFine component (either backend), which splits
+        # baselines into multiple stride groups. For every other rfi_vis
+        # component it just inflates n_int_time (the fine-grid time dimension)
+        # and slows the run, so only request it when that component is actually
+        # selected. min_divisors is an internal tuning parameter, not
+        # user-configurable.
+        var_cfg = cfg.model.find_one(VariableFineTimeIntegrationMixin)
+        uses_variable = var_cfg is not None
 
-        self.rfi_grid = rfi_grid(import_components(config["model"]["components"]))
+        self.rfi_grid = rfi_grid(cfg.model.component_classes())
+        fine_cfg = cfg.model.find_one(FineTimeIntegrationMixin)
+        time_int_factor = fine_cfg.time_int_factor if fine_cfg is not None else 1.0
+        min_time_bins = var_cfg.min_time_bins if var_cfg is not None else 1
+        max_time_bins = var_cfg.max_time_bins if var_cfg is not None else 30
+
         self.estimate_rfi_sampling(
-            config["rfi"]["time_int_factor"],
-            config["rfi"].get("min_time_bins", 1),
-            config["rfi"].get("max_time_bins", 30),
+            time_int_factor,
+            min_time_bins,
+            max_time_bins,
             min_divisors=self._MIN_DIVISORS_VARIABLE if uses_variable else 1,
             grid=self.rfi_grid,
         )
 
         self._set_freqs_times()
 
+        resolved_min_el = (
+            (traj_cfg.min_elevation_deg if traj_cfg is not None else 0.0)
+            if min_elevation is _FROM_MODEL
+            else min_elevation
+        )
         self.set_elevation_mask(
-            config["rfi"].get("min_elevation"), require_in_view=require_in_view
+            resolved_min_el, require_in_view=require_in_view
         )
 
         if sharding_enabled():
@@ -250,7 +233,7 @@ class TabConfig:
             self.estimator_flags = make_global(
                 self.estimator_flags, replicated_sharding()
             )
-            # rfi.gp_cov.std: data reads this one directly, against vis_obs above, so
+            # rfi_signal.std_jy: data reads this one directly, against vis_obs above, so
             # it has to be global for the same reason the others are. None
             # where no gain table was configured, which make_global cannot take.
             if self.gain_flags is not None:
@@ -317,8 +300,8 @@ class TabConfig:
                 )
                 if require_in_view:
                     raise ValueError(
-                        f"{never_up}. Remove it from satellites.norad_ids or "
-                        "lower rfi.min_elevation."
+                        f"{never_up}. Remove it from the trajectory component's "
+                        "norad_ids or lower its min_elevation_deg."
                     )
                 print(f"Warning: {never_up} and comes back as zero.")
                 continue
@@ -377,7 +360,7 @@ class TabConfig:
 
                 if degenerate.any():
                     raise ValueError(
-                        f"data.noise = {noise!r}: {int(degenerate.sum())} of "
+                        f"data.noise_jy = {noise!r}: {int(degenerate.sum())} of "
                         f"{sigma.size} values are positive and finite in the file "
                         f"but not after conversion to {converted.dtype} -- they "
                         "underflow to zero or overflow to infinity at this run's "
@@ -395,7 +378,7 @@ class TabConfig:
                 # the same mistake rather than as a non-positive number.
                 if isinstance(noise, bool):
                     raise ValueError(
-                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        f"data.noise_jy = {noise!r} is neither a number nor a path to "
                         "an .npz of noise values. Give a positive number in Jy, a "
                         "path to an .npz, or leave it null to use the MS's own "
                         "estimate."
@@ -408,13 +391,13 @@ class TabConfig:
                     value = float(noise)
                 except (TypeError, ValueError) as err:
                     raise ValueError(
-                        f"data.noise = {noise!r} is neither a number nor a path to "
+                        f"data.noise_jy = {noise!r} is neither a number nor a path to "
                         "an .npz of noise values."
                     ) from err
 
                 if not np.isfinite(value) or value <= 0:
                     raise ValueError(
-                        f"data.noise = {noise!r} is not a usable noise. Give a "
+                        f"data.noise_jy = {noise!r} is not a usable noise. Give a "
                         "positive number in Jy, a path to an .npz, or leave it "
                         "null to use the MS's own estimate."
                     )
@@ -428,7 +411,7 @@ class TabConfig:
             raise ValueError(
                 "The MS partition has neither a usable SIGMA_SPECTRUM nor a "
                 "readable SIGMA column, so it carries no noise estimate at all; "
-                "set data.noise explicitly."
+                "set data.noise_jy explicitly."
             )
 
     def apply_gain_table(self, gain_table):
@@ -440,7 +423,7 @@ class TabConfig:
         gains are applied once at read time instead of on every forward pass,
         and everything downstream (priors, RFI/AST models, chi^2, and the
         results written back to the MS) lives in one frame: the calibrated one.
-        That retires the manual "scale the noise by k and ``ast.gp_cov.std`` by
+        That retires the manual "scale the noise by k and ``GPVisAst.std_jy`` by
         k" workaround -- by k, not k^2, since std is a standard deviation in Jy
         and scales with the data rather than with its square.
 
@@ -497,7 +480,7 @@ class TabConfig:
             self.noise = jnp.asarray(noise) / jnp.abs(jnp.asarray(g_bl))
             self.noise_scalar = representative_sigma(self.noise)
 
-        # Kept apart from self.flags: data.flags decides whether the MS's own
+        # Kept apart from self.flags: data.exclude_flagged decides whether the MS's own
         # flags are honoured, but an uncalibratable visibility is not data at
         # all and is excluded even when that is false. set_flags ORs it in.
         self.gain_flags = jnp.asarray(bad)
@@ -533,7 +516,7 @@ class TabConfig:
         )
 
         # A visibility with no valid gain was never calibrated, so it is excluded
-        # even when data.flags is false -- see apply_gain_table.
+        # even when data.exclude_flagged is false -- see apply_gain_table.
         if getattr(self, "gain_flags", None) is not None:
             self.flags = self.flags | self.gain_flags
 
@@ -544,7 +527,7 @@ class TabConfig:
         # wants the cleanest sample there is -- and an uncalibratable
         # visibility, which apply_gain_table left in the raw frame under a
         # unity gain, is on a different flux scale from every calibrated one
-        # beside it. Not the likelihood mask: data.flags: false empties that
+        # beside it. Not the likelihood mask: data.exclude_flagged: false empties that
         # deliberately, and it would take the MS's knowledge with it.
         self.estimator_flags = jnp.asarray(self.ms_flags)
         if getattr(self, "gain_flags", None) is not None:
@@ -559,7 +542,7 @@ class TabConfig:
             # want a clean sample still know which those are.
             print(
                 f"{100 * known:.1f} % is flagged in the MS and is being fitted "
-                "anyway (data.flags: false)"
+                "anyway (data.exclude_flagged: false)"
             )
         print()
 
@@ -569,10 +552,11 @@ class TabConfig:
         # callable unbound, on an object carrying nothing but an ms_path --
         # tests/test_noise.py does exactly that -- so the chunk is an optional
         # tuning knob here rather than a required attribute.
-        data_args = getattr(self, "args", {}).get("data", {})
+        run_cfg = getattr(self, "config", None)
+        row_chunk = getattr(getattr(run_cfg, "data", None), "row_chunk", None)
         ms_params = read_ms(
             self.ms_path, freq, None, corr, data_col,
-            row_chunk=data_args.get("row_chunk"),
+            row_chunk=row_chunk,
         )
 
         # The MS's phase centre, as read_ms converts it to J2000 from the frame
@@ -585,7 +569,7 @@ class TabConfig:
         self.ants_itrf = ms_params["ants_itrf"]
         self.vis_obs = ms_params["vis_obs"]
         self.uvw = ms_params["uvw"]
-        # What the MS says is contaminated, kept whatever data.flags decides to
+        # What the MS says is contaminated, kept whatever data.exclude_flagged decides to
         # do with it. The two are different questions: whether a sample is
         # known to be bad, and whether tabascal declines to fit it. A strong
         # emitter flagged by some other task is exactly the data tabascal is
@@ -715,9 +699,15 @@ class TabConfig:
 
         ns = [self.n_freq, self.n_time]
         ss_factors = [self.n_int_freq, self.n_int_time]
+        run_cfg = getattr(self, "config", None)
+        rfi_sig_cfg = (
+            run_cfg.model.find_one(RFIGPConfig)
+            if run_cfg is not None
+            else None
+        )
         pad_factors = [
-            self.args["rfi"]["freq_pad_factor"],
-            self.args["rfi"]["time_pad_factor"],
+            rfi_sig_cfg.freq_pad_factor if rfi_sig_cfg is not None else 2.0,
+            rfi_sig_cfg.time_pad_factor if rfi_sig_cfg is not None else 2.0,
         ]
         # Apply the frequency offset/scale in host f64: domain_ss uses the
         # model's JAX precision, which cannot carry GHz frequencies in f32.
@@ -760,18 +750,12 @@ class TabConfig:
             )
 
 
-# The state keys Model supplies itself, whatever the component list holds: the
-# two visibility accumulators the components add into, zeroed below, and the
-# RMSE diagnostics. Every other state key comes from a component.
-BASE_STATE_KEYS = ("vis_ast", "vis_rfi", "rmse_ast", "rmse_rfi", "rmse_gains")
-
-
 class Model:
 
     def __init__(
         self,
         tab_config: TabConfig,
-        component_list: List[str],
+        component_list: Optional[Sequence[Any]] = None,
         likelihood: Callable = gaussian,
     ):
 
@@ -786,7 +770,19 @@ class Model:
             },
         )
 
-        components = [C() for C in import_components(component_list)]
+        if component_list is None:
+            specs = tab_config.config.model.components
+        else:
+            specs = list(component_list)
+
+        components = []
+        for idx, entry in enumerate(specs):
+            if isinstance(entry, Component):
+                components.append(entry)
+            elif isinstance(entry, ComponentSpec):
+                components.append(entry.instantiate())
+            else:
+                components.append(_parse_component_entry(entry, idx).instantiate())
         self.components = components
 
         # The components chain through a shared state dict, each reading keys the

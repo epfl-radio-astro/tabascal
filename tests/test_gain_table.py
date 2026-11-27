@@ -826,7 +826,7 @@ class TestApplyGainTable:
         config = _tab_config(vis_obs, noise=0.5, flags=ms_flags)
 
         config.apply_gain_table(path)
-        # data.flags: false -- the likelihood declines to honour the MS, and
+        # data.exclude_flagged: false -- the likelihood declines to honour the MS, and
         # the estimator mask keeps that knowledge regardless.
         config.set_flags(False)
 
@@ -837,7 +837,7 @@ class TestApplyGainTable:
         clean = ~touches_2[:, None, None] & ~ms_flags
         assert not estimator[clean].any()
         # The likelihood mask is a different question and answers it its way:
-        # data.flags: false, so only the gain flags are in it.
+        # data.exclude_flagged: false, so only the gain flags are in it.
         assert not np.asarray(config.flags)[0, 0, 0]
 
     def test_the_width_a_partial_table_leaves_is_the_calibrated_one(
@@ -1068,14 +1068,12 @@ class TestInitOrdering:
         config = {
             "model": {"components": [], "precision": "single"},
             "data": {
-                "freq": 0,
+                "freq_hz": None,
                 "corr": "xx",
                 "data_col": "DATA",
-                "noise": 0.7,
-                "flags": False,
+                "noise_jy": 0.7,
+                "exclude_flagged": False,
             },
-            "rfi": {"n_int_freq": 1, "time_int_factor": 1.0},
-            "satellites": {},
         }
         if key:
             config["data"]["gain_table"] = gain_table

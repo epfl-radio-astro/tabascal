@@ -26,7 +26,6 @@ from tabascal.fft_gp import (
     supersample_domain_k,
     supersample_domain_specs,
     supersample_fourier,
-    validate_signal_type,
 )
 from tabascal.timing import clear_timings, disable_timings
 
@@ -796,14 +795,19 @@ class TestRealSignalType:
         assert not jnp.iscomplexobj(y_ss)
         np.testing.assert_allclose(y_ss, supersample(y + 0j, [3, 3]).real, atol=1e-5)
 
-    @pytest.mark.parametrize("value", [None, "complex", "real"])
+    @pytest.mark.parametrize("value", ["complex", "real"])
     def test_the_config_value_validates(self, value):
-        assert validate_signal_type(value, "rfi.signal_type") == (value or "complex")
+        from tabascal.schema import RFIGPConfig
+
+        assert RFIGPConfig(signal_type=value).signal_type == value
+        assert RFIGPConfig().signal_type == "complex"
 
     @pytest.mark.parametrize("value", ["Real", "", 0, 1, False, True, ["real"]])
     def test_a_bad_config_value_is_refused_by_name(self, value):
-        with pytest.raises(ValueError, match=r"rfi\.signal_type"):
-            validate_signal_type(value, "rfi.signal_type")
+        from tabascal.schema import RFIGPConfig
+
+        with pytest.raises(ValueError, match="signal_type"):
+            RFIGPConfig(signal_type=value)
 
 
 # Padded lengths 9, 8 (pad 2), 5, 4 (no padding) and a single channel, whose pad of

@@ -370,7 +370,7 @@ class TestPerBaselineFreqSigma:
         """
         col = _sigma_spectrum(np.zeros((N_BL, N_FREQ)))
 
-        with pytest.raises(NoUsableSigma, match="set data.noise explicitly"):
+        with pytest.raises(NoUsableSigma, match="set data.noise_jy explicitly"):
             per_baseline_freq_sigma(col, N_TIME, N_BL)
 
         assert issubclass(NoUsableSigma, ValueError)
@@ -615,7 +615,7 @@ class TestTimeVaryingSigmaSpectrum:
 
     def test_a_column_with_nothing_valid_in_it_is_still_NoUsableSigma(self):
         """What ``partition_noise`` falls through to SIGMA on."""
-        with pytest.raises(NoUsableSigma, match="set data.noise explicitly"):
+        with pytest.raises(NoUsableSigma, match="set data.noise_jy explicitly"):
             per_baseline_freq_sigma(
                 _sigma_spectrum_time(-self._varying()), N_TIME, N_BL
             )
@@ -1013,7 +1013,7 @@ class TestReadNoiseFile:
     def test_a_boolean_array_is_not_a_noise(self, tmp_path, key, kwargs):
         """`np.ones(n, dtype=bool).astype(float)` is a uniform 1 Jy noise.
 
-        The same mistake the scalar path already refuses in `data.noise: true`,
+        The same mistake the scalar path already refuses in `data.noise_jy: true`,
         and refused for the same reason: 1 Jy is plausible enough that a run on a
         noise nobody wrote down would go unnoticed. A file of flags is a file
         answering a different question, whichever key it is under.
@@ -1067,11 +1067,11 @@ class TestReadNoiseFile:
 
 
 # ---------------------------------------------------------------------------
-# The data.noise override
+# The data.noise_jy override
 # ---------------------------------------------------------------------------
 
 class TestSetNoiseOverride:
-    """``data.noise``: the last word on the noise, and the only scalar fallback.
+    """``data.noise_jy``: the last word on the noise, and the only scalar fallback.
 
     Called on a stand-in rather than a real ``TabConfig``, which would need an MS
     on disk to construct; the method reads four attributes and writes two.
@@ -1111,12 +1111,12 @@ class TestSetNoiseOverride:
         Zero noise is not a noise: it divides the likelihood by nothing. Whichever
         the user meant -- null, or a real value -- they should be told.
         """
-        with pytest.raises(ValueError, match="data.noise"):
+        with pytest.raises(ValueError, match="data.noise_jy"):
             self._apply(bad)
 
     def test_something_that_is_not_a_noise_at_all_is_rejected_by_name(self):
-        """A YAML list reaching float() would say nothing about data.noise."""
-        with pytest.raises(ValueError, match="data.noise"):
+        """A YAML list reaching float() would say nothing about data.noise_jy."""
+        with pytest.raises(ValueError, match="data.noise_jy"):
             self._apply([1.0, 2.0])
 
     @pytest.mark.parametrize("flag", [True, False])
@@ -1268,7 +1268,7 @@ class TestNoiseMayBeUnset:
 class TestNoiselessMS:
     """The order of the two steps is the whole of the recovery path.
 
-    ``TabConfig`` reads the MS first and applies ``data.noise`` second, so a read
+    ``TabConfig`` reads the MS first and applies ``data.noise_jy`` second, so a read
     that stopped at an unusable noise column would take the override's turn away
     and the documented recovery would be unreachable. Both real methods are
     called here, in that order, on a stand-in: a real ``TabConfig`` would want an
@@ -1362,7 +1362,7 @@ class TestNoiselessMS:
 
         config = self._read(monkeypatch)
 
-        with pytest.raises(ValueError, match="set data.noise explicitly"):
+        with pytest.raises(ValueError, match="set data.noise_jy explicitly"):
             TabConfig.set_noise(config, None)
 
     def test_no_noise_can_leak_past_the_error(self, monkeypatch):
@@ -1383,7 +1383,7 @@ class TestInitCallsTheReadBeforeTheOverride:
 
     Every test above calls the two methods itself, in the order it wants, so all
     of them would still pass if ``TabConfig.__init__`` were reordered to apply
-    ``data.noise`` first -- and then ``read_ms_params`` would overwrite the
+    ``data.noise_jy`` first -- and then ``read_ms_params`` would overwrite the
     override with the MS's own estimate (or with ``None``), making the documented
     recovery unreachable and the option silently ignored. So call the real
     constructor and record what it really does.
@@ -1407,14 +1407,12 @@ class TestInitCallsTheReadBeforeTheOverride:
         return {
             "model": {"components": [], "precision": "single"},
             "data": {
-                "freq": 0,
+                "freq_hz": None,
                 "corr": "xx",
                 "data_col": "DATA",
-                "noise": noise,
-                "flags": False,
+                "noise_jy": noise,
+                "exclude_flagged": False,
             },
-            "rfi": {"n_int_freq": 1, "time_int_factor": 1.0},
-            "satellites": {},
         }
 
     def _construct(self, monkeypatch, noise=0.7):
@@ -1468,7 +1466,7 @@ class TestInitCallsTheReadBeforeTheOverride:
         assert names.count("set_noise") == 1
 
     def test_the_configured_value_is_what_reaches_set_noise(self, monkeypatch):
-        """``data.noise``, not some other key that happens to be nearby."""
+        """``data.noise_jy``, not some other key that happens to be nearby."""
         _, _, calls = self._construct(monkeypatch, noise=0.123)
 
         assert dict((name, args) for name, args in calls)["set_noise"] == (0.123,)

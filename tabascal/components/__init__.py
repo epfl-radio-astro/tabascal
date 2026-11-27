@@ -1,11 +1,21 @@
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Dict, Any, Callable, Iterable, List, Sequence
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Type, Union
 import importlib
 import inspect
 import pkgutil
 
 from jax import Array
+from pydantic import ValidationError
+
+from tabascal.schema import EmptyComponentConfig, StrictConfigModel, format_validation_error
+
+
+#: State keys Model supplies itself, whatever the component list holds: the
+#: two visibility accumulators the components add into, zeroed at assembly, and
+#: the RMSE diagnostics. Every other state key comes from a component.
+BASE_STATE_KEYS = ("vis_ast", "vis_rfi", "rmse_ast", "rmse_rfi", "rmse_gains")
 
 
 class MissingStateInput(ValueError):
@@ -28,6 +38,9 @@ class ComponentOrderError(ValueError):
 class Component(ABC):
     """Base class for all tabascal components"""
 
+    #: Pydantic schema declaring the required/optional config inputs of this component.
+    Config: ClassVar[Type[StrictConfigModel]] = EmptyComponentConfig
+
     # Class attributes defining component interface
     required_inputs: Dict[str, tuple] = {}
     parameter_shapes: Dict[str, tuple] = {}
@@ -47,6 +60,29 @@ class Component(ABC):
     # Set True on RFI visibility components that integrate each data-grid cell
     # in closed form, so no fine time grid is sized for them (read by rfi_grid).
     integrates_cells: bool = False
+
+    def __init__(self, config: Optional[Union[StrictConfigModel, Mapping[str, Any]]] = None):
+        schema_cls = type(self).Config
+        if config is None:
+            try:
+                config = schema_cls()
+            except ValidationError as err:
+                raise format_validation_error(
+                    err, prefix=self.__class__.__name__, model_cls=schema_cls, component_cls=type(self)
+                ) from None
+        elif isinstance(config, Mapping):
+            try:
+                config = schema_cls.model_validate(dict(config))
+            except ValidationError as err:
+                raise format_validation_error(
+                    err, prefix=self.__class__.__name__, model_cls=schema_cls, component_cls=type(self)
+                ) from None
+        elif not isinstance(config, schema_cls):
+            raise TypeError(
+                f"{self.__class__.__name__} expects {schema_cls.__name__} "
+                f"(or a mapping), got {type(config).__name__}."
+            )
+        self.config: Any = config
 
     @abstractmethod
     def setup(self, tab_config: Any) -> None:
@@ -117,6 +153,14 @@ class Component(ABC):
                 "set model.precision to 'double' in the config."
             )
 
+    def resolved_options(self) -> Dict[str, Any]:
+        """Options whose value setup decided, as the concrete values it resolved to.
+
+        Recorded in the run's saved ``config.yaml`` so that it records what ran
+        rather than, say, ``'auto'``. Called after :meth:`setup`.
+        """
+        return {}
+
     def _set_outputs(self):
         pass
 
@@ -151,7 +195,7 @@ def is_class(obj: Any) -> bool:
 def in_tree_components() -> Dict[str, type]:
     """Every concrete component shipped with tabascal, keyed by config reference.
 
-    The keys are the ``"module:Class"`` strings ``model.components`` is written
+    The keys are the ``"module.Class"`` strings ``model.components`` is written
     in, so they can be quoted straight back at the user. Abstract bases are left
     out -- they cannot be listed in a config.
     """
@@ -169,7 +213,7 @@ def in_tree_components() -> Dict[str, type]:
                 and obj.__module__ == module.__name__
                 and not inspect.isabstract(obj)
             ):
-                found[f"{info.name}:{name}"] = obj
+                found[f"{info.name}.{name}"] = obj
     return found
 
 
@@ -198,24 +242,38 @@ def component_outputs(component) -> List[str]:
 
 
 def component_ref(component) -> str:
-    """The ``"module:Class"`` string a component is written as in a config."""
+    """The ``"module.Class"`` string a component is written as in a config."""
     cls = component if isinstance(component, type) else type(component)
     for ref, known in in_tree_components().items():
         if known is cls:
             return ref
-    return f"{cls.__module__}:{cls.__name__}"
+    return f"{cls.__module__}.{cls.__name__}"
 
 
 def _describe_missing(
-    exc: MissingStateInput, components: Sequence[Any], index: int
+    exc: MissingStateInput,
+    components: Sequence[Any],
+    index: int,
+    source_indices: Optional[Sequence[int]] = None,
 ) -> str:
     """Turn a missing state key into an actionable message.
 
     The two failure modes read very differently to a user: a component that is
     not in the list at all has to be added, whereas one that is there but later
     only has to be moved. Say which.
+
+    ``source_indices`` marks a list that was put in dependency order for the
+    user (see :func:`validate_component_order`). Its order is not theirs to fix,
+    so the message only says what is missing, not where it should go.
     """
+    orig = lambda k: source_indices[k] if source_indices is not None else k
     name = component_ref(components[index])
+    if source_indices is None:
+        nothing = "nothing before it produces"
+        add = f"add one before '{name}'"
+    else:
+        nothing = "no component in model.components produces"
+        add = "add one"
     # Only producers that write it on the grid it is read on, when any do:
     # offering a fine-grid producer to a data-grid reader trades one error for
     # another.
@@ -230,11 +288,11 @@ def _describe_missing(
         for i, comp in enumerate(components[index + 1 :], start=index + 1)
         if exc.key in component_outputs(comp)
     ]
-    where = f"model.components[{index}]"
+    where = f"model.components[{orig(index)}]"
 
     if any(on_grid(comp) for _, comp in later):
         listed = ", ".join(
-            f"'{component_ref(comp)}' (model.components[{i}])"
+            f"'{component_ref(comp)}' (model.components[{orig(i)}])"
             for i, comp in later if on_grid(comp)
         )
         return (
@@ -255,7 +313,7 @@ def _describe_missing(
         return (
             f"{where} '{name}' reads the model state key '{exc.key}' on the "
             f"{_grid_name(wanted)} {wanted}, which nothing before it produces. "
-            f"'{component_ref(comp)}' (model.components[{i}]) writes it, but on "
+            f"'{component_ref(comp)}' (model.components[{orig(i)}]) writes it, but on "
             f"the {_grid_name(written)} {written}.{instead}"
         )
 
@@ -269,13 +327,12 @@ def _describe_missing(
         )
         return (
             f"{where} '{name}' reads the model state key '{exc.key}', which "
-            f"nothing before it produces. It is produced by {listed}, {absent} "
-            f"-- add one before '{name}'."
+            f"{nothing}. It is produced by {listed}, {absent} -- {add}."
         )
     return (
-        f"{where} '{name}' reads the model state key '{exc.key}', which nothing "
-        "before it produces and which no component in tabascal.components "
-        f"writes. Check the spelling of '{exc.key}' in {name}.required_inputs."
+        f"{where} '{name}' reads the model state key '{exc.key}', which {nothing} "
+        "and which no component in tabascal.components writes. Check the "
+        f"spelling of '{exc.key}' in {name}.required_inputs."
     )
 
 
@@ -306,7 +363,14 @@ def rfi_grid(classes: Iterable[type]):
     return None
 
 
-def _check_grid(components, producer: int, consumer: int, key: str, shape) -> None:
+def _check_grid(
+    components,
+    producer: int,
+    consumer: int,
+    key: str,
+    shape,
+    source_indices: Optional[Sequence[int]] = None,
+) -> None:
     """Raise if ``key`` is read with a different shape from the one it was written with.
 
     The order check alone compares key names, and the fine-grid and data-grid
@@ -316,21 +380,80 @@ def _check_grid(components, producer: int, consumer: int, key: str, shape) -> No
     written = getattr(components[producer], "output_shapes", {}).get(key)
     if written is None or tuple(written) == tuple(shape):
         return
+    orig = lambda k: source_indices[k] if source_indices is not None else k
     name = component_ref(components[consumer])
     raise ComponentOrderError(
-        f"model.components[{consumer}] '{name}' reads the model state key '{key}' "
+        f"model.components[{orig(consumer)}] '{name}' reads the model state key '{key}' "
         f"on the {_grid_name(shape)} {tuple(shape)}, but "
-        f"'{component_ref(components[producer])}' (model.components[{producer}]) "
+        f"'{component_ref(components[producer])}' (model.components[{orig(producer)}]) "
         f"writes it on the {_grid_name(written)} {tuple(written)}. The RFI "
         "components must share a grid: the Fine trajectory and signal (e.g. "
-        "trajectory:FixedOrbitFine, rfi_signal:ComplexRFIVarAntFine) with an "
-        "rfi_vis:RiemannVis*Fine, or trajectory:FixedOrbit with "
-        "rfi_signal:ComplexRFIVarAnt or ComplexRFIConstAnt and rfi_vis:AnalyticVis."
+        "trajectory.FixedOrbitFine, rfi_signal.ComplexRFIVarAntFine) with an "
+        "rfi_vis.RiemannVis*Fine, or trajectory.FixedOrbit with "
+        "rfi_signal.ComplexRFIVarAnt or ComplexRFIConstAnt and rfi_vis.AnalyticVis."
     )
 
 
+def dependency_order(classes: Sequence[type]) -> List[int]:
+    """The order to run ``classes`` in, as indices into it: each after what it reads.
+
+    Read from the classes' declarations alone, so it needs no observation. A
+    component that reads a state key runs after every component that writes it
+    without reading it. One that also writes the key it reads accumulates into
+    it (``GPVisAst`` and ``DiscreteSkyVis`` add into ``vis_ast``), and is not
+    ordered against the others that do; one that only reads it runs after all
+    of them, as the gains run after every sky and RFI term.
+
+    The sort is stable: of the components free to run next, the one listed
+    first does, so a list already in a valid order comes back as it was. A key
+    nothing writes is left for :func:`validate_component_order` to report.
+    """
+    import heapq
+
+    classes = list(classes)
+    reads = [set(getattr(cls, "required_inputs", {})) for cls in classes]
+    writes = [set(getattr(cls, "output_shapes", {})) for cls in classes]
+
+    after: List[set] = [set() for _ in classes]
+    for i in range(len(classes)):
+        for key in reads[i]:
+            for j in range(len(classes)):
+                if j == i or key not in writes[j]:
+                    continue
+                accumulates_j = key in reads[j]
+                accumulates_i = key in writes[i]
+                if not accumulates_j or not accumulates_i:
+                    after[i].add(j)
+
+    waiting_on = [len(deps) for deps in after]
+    unblocks: List[List[int]] = [[] for _ in classes]
+    for i, deps in enumerate(after):
+        for j in deps:
+            unblocks[j].append(i)
+    ready = [i for i, n in enumerate(waiting_on) if n == 0]
+    heapq.heapify(ready)
+    order: List[int] = []
+    while ready:
+        i = heapq.heappop(ready)
+        order.append(i)
+        for k in unblocks[i]:
+            waiting_on[k] -= 1
+            if waiting_on[k] == 0:
+                heapq.heappush(ready, k)
+    if len(order) != len(classes):
+        stuck = [component_ref(classes[i]) for i in range(len(classes)) if i not in order]
+        raise ComponentOrderError(
+            "model.components cannot be put in dependency order: "
+            f"{', '.join(stuck)} each read a state key another of them writes."
+        )
+    return order
+
+
 def validate_component_order(
-    components: Sequence[Any], initial_state_keys: Iterable[str] = ()
+    components: Sequence[Any],
+    initial_state_keys: Iterable[str] = (),
+    *,
+    source_indices: Optional[Sequence[int]] = None,
 ) -> None:
     """Check a ``model.components`` list against the components' declarations.
 
@@ -341,6 +464,11 @@ def validate_component_order(
     whether or not they have been set up, so the whole list is checked before any
     of it is traced; without it a missing or mis-ordered component surfaced only
     as a ``KeyError`` on a state key from inside the JIT-ed forward pass.
+
+    ``source_indices`` is for a list the caller put in dependency order:
+    ``source_indices[i]`` is where ``components[i]`` was in the list as written.
+    Messages then cite those positions and, since the order is not the user's
+    to fix, do not ask for a component to be moved or added "before" another.
     """
     state = dict.fromkeys(initial_state_keys)
     initial = set(state)
@@ -351,11 +479,18 @@ def validate_component_order(
             comp.validate_state(state)
         except MissingStateInput as exc:
             raise ComponentOrderError(
-                _describe_missing(exc, components, index)
+                _describe_missing(exc, components, index, source_indices=source_indices)
             ) from None
         for key, shape in getattr(comp, "required_inputs", {}).items():
             if key in written:
-                _check_grid(components, written[key], index, key, shape)
+                _check_grid(
+                    components,
+                    written[key],
+                    index,
+                    key,
+                    shape,
+                    source_indices=source_indices,
+                )
         state.update(dict.fromkeys(component_outputs(comp)))
         written.update(
             (key, index) for key in component_outputs(comp) if key not in initial

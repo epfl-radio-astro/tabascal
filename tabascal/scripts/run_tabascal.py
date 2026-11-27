@@ -86,8 +86,8 @@ def build_parser():
         metavar="FILE",
         help=(
             "Text file of NORAD IDs to include, one per line (blank lines and "
-            "'#' comments ignored). Overrides satellites.norad_ids_path and "
-            "satellites.norad_ids in the config file."
+            "'#' comments ignored). Overrides norad_ids_path and norad_ids on "
+            "the trajectory component in the config file."
         ),
     )
     # A label, not a path: it starts the name of the directory the run creates

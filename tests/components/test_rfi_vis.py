@@ -17,6 +17,7 @@ from tabascal.interferometry import (
     calculate_rfi_vis_fine,
     get_divisors,
 )
+from tabascal.schema import ConfigValidationError
 from .conftest import active_precision, make_constants
 
 
@@ -44,21 +45,20 @@ def create_config(
         a1=a1,
         a2=a2,
         precision=precision or active_precision(),
-        # Deliberately empty by default: the integration sample counts are read
-        # off the bound TabConfig attributes, never out of the raw config dict.
-        # ``rfi_args`` is for the keys that genuinely do live in the config dict,
-        # i.e. rfi.baseline_block_size.
-        args={"rfi": dict(rfi_args or {})},
+        _rfi_vis_kwargs=dict(rfi_args or {}),
     )
 
 
 def backend(cls, name):
-    """``cls()``, set up with ``rfi.backend: name`` whatever config it is given."""
-    impl = cls()
-    setup = impl.setup
+    """``cls`` configured with ``backend: name`` plus any ``config._rfi_vis_kwargs``."""
+    impl = cls({"backend": name})
+    orig_setup = impl.setup
+
     def setup_with(config):
-        rfi = {**config.args["rfi"], "backend": name}
-        setup(SimpleNamespace(**{**vars(config), "args": {**config.args, "rfi": rfi}}))
+        kwargs = {**getattr(config, "_rfi_vis_kwargs", {}), "backend": name}
+        impl.config = cls.Config.model_validate(kwargs)
+        orig_setup(config)
+
     impl.setup = setup_with
     return impl
 
@@ -425,9 +425,7 @@ def test_the_block_size_sets_the_number_of_scan_steps(block_size, expected_steps
 
 
 def test_the_default_block_size_is_used_when_the_config_does_not_set_one():
-    """A config predating the key still builds, on the base default of 128."""
     config = create_config(4, 2, 3, 5, 4, 3)
-    assert config.args["rfi"] == {}
 
     impl = backend(RiemannVisFine, "jax")
     impl.setup(config)
@@ -505,37 +503,26 @@ def test_a_null_block_size_keeps_the_tape_bounded():
 def test_a_baseline_block_size_that_is_not_a_positive_whole_number_is_rejected(
     block_size,
 ):
-    """Rejected in setup, by name, rather than silently rounded or ignored.
-
-    ``.inf`` and ``.nan`` are in the list because yaml can spell them and because
-    they are the two that reach ``int()`` before any comparison does. ``None`` is
-    deliberately not in it: null is a setting, covered below.
-    """
-    config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"baseline_block_size": block_size})
-
-    with pytest.raises(RuntimeError, match="baseline_block_size"):
-        backend(RiemannVisFine, "jax").setup(config)
+    with pytest.raises(ConfigValidationError, match="baseline_block_size"):
+        RiemannVisFine({"baseline_block_size": block_size, "backend": "jax"})
 
 
 @pytest.mark.parametrize("Impl", [RiemannVisFine, RiemannVisVariableFine])
 @pytest.mark.parametrize("name, expected", [(None, "ffi"), ("ffi", "ffi"), ("jax", "jax")])
 def test_rfi_backend_picks_the_implementation(Impl, name, expected):
-    """null is the default, ``ffi``; the FFI route is the one that has no constants."""
+    """``ffi`` is the default; the FFI route is the one that has no constants."""
     config = make_variable_config(4, 2, 3, 5, 4, 3, strides=[1, 2])
-    config.args["rfi"]["backend"] = name
-    impl = Impl()
+    impl = Impl({} if name is None else {"backend": name})
     impl.setup(config)
 
     assert impl.backend == expected
     assert (impl.build_constants() == {}) == (expected == "ffi")
 
 
-@pytest.mark.parametrize("name", ["FFI", "xla", 1])
+@pytest.mark.parametrize("name", ["FFI", "xla", 1, None])
 def test_an_unknown_rfi_backend_is_refused(name):
-    config = create_config(4, 2, 3, 5, 4, 3, rfi_args={"backend": name})
-
-    with pytest.raises(RuntimeError, match="rfi.backend must be one of 'ffi', 'jax'"):
-        RiemannVisFine().setup(config)
+    with pytest.raises(ConfigValidationError, match="backend"):
+        RiemannVisFine({"backend": name})
 
 
 _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
@@ -590,9 +577,8 @@ _SHARDED_BLOCK_SCRIPT = textwrap.dedent(
             n_ant=n_ant, n_rfi=n_rfi, n_time=n_time, n_freq=n_freq,
             n_int_time=n_int_time, n_int_freq=n_int_freq, n_bl=n_bl, a1=a1, a2=a2,
             precision="double",
-            args={"rfi": {"baseline_block_size": block_size, "backend": "jax"}},
         )
-        comp = RiemannVisFine()
+        comp = RiemannVisFine({"baseline_block_size": block_size, "backend": "jax"})
         comp.setup(config)
         constants = {
             f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()
@@ -710,7 +696,6 @@ def test_integration_sample_counts_come_from_the_bound_config(Impl):
     """
 
     config = make_variable_config(4, 2, 3, 5, 4, 3, strides=[1, 2])
-    assert config.args["rfi"] == {}
 
     impl = Impl()
     impl.setup(config)

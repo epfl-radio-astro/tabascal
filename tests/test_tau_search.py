@@ -1569,7 +1569,7 @@ class TestHorizonMasking:
         assert np.all(np.isfinite(r[:, frames]))
 
     def test_the_cut_is_inclusive(self, setting_obs):
-        """Same semantics as rfi.min_elevation: the cut is the lowest elevation
+        """Same semantics as trajectory.min_elevation_deg: the cut is the lowest elevation
         still modelled, so a frame sitting exactly on it is in view."""
         exact = float(setting_obs.elevation[3])
 
@@ -2121,14 +2121,25 @@ def stub_config_mode(monkeypatch, obs, record, tmp_path):
     """
     import tabascal.config
     import tabascal.scripts._run_tabascal_impl as impl
+    from tabascal.schema import validate_config
 
-    config = {
-        "data": {"ms_path": str(tmp_path / "obs.ms"), "out_dir": None,
-                 "data_col": "DATA", "corr": "xx", "freq": None},
-        "rfi": {"min_elevation": 0},
-        "satellites": {},
-        "model": {"precision": "double"},
-    }
+    config = validate_config({
+        "data": {
+            "ms_path": str(tmp_path / "obs.ms"),
+            "out_dir": None,
+            "data_col": "DATA",
+            "corr": "xx",
+            "freq_hz": None,
+        },
+        "model": {
+            "precision": "double",
+            "components": [
+                {"trajectory.FixedOrbit": {"norad_ids": [NORAD_ID], "min_elevation_deg": 0}},
+                "rfi_signal.ComplexRFIVarAnt",
+                "rfi_vis.AnalyticVis",
+            ],
+        },
+    })
     tab_config = SimpleNamespace(
         vis_obs=obs.vis,
         flags=np.zeros(obs.vis.shape, dtype=bool),
@@ -2147,7 +2158,7 @@ def stub_config_mode(monkeypatch, obs, record, tmp_path):
         orbit_records=[record],
         min_elevation=0.0,
         rfi_mask=None,
-        args={"data": {"data_col": "DATA", "corr": "xx"}},
+        config=config,
     )
 
     monkeypatch.setattr(tabascal.config, "load_config", lambda path: config)

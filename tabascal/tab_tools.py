@@ -379,14 +379,15 @@ def loss_trace_path(config_path: Optional[str] = None) -> Optional[str]:
     return os.environ.get("TAB_LOSS_TRACE") or config_path or None
 
 
-def run_trace_path(opt_config: dict, map_path: str) -> str:
+def run_trace_path(opt_config, map_path: str) -> str:
     """Where :func:`run_opt` writes the run's trace: the traced path if any,
     else ``trace.npz`` beside the MAP prediction.
 
     ``.npz`` is appended when missing, as ``np.savez`` would append it, so a
     reader given this path finds the file the writer made.
     """
-    path = loss_trace_path(opt_config.get("trace_path")) or os.path.join(
+    cfg_trace = opt_config.trace_path if hasattr(opt_config, "trace_path") else opt_config.get("trace_path")
+    path = loss_trace_path(cfg_trace) or os.path.join(
         os.path.dirname(os.path.normpath(map_path)), LOSS_TRACE
     )
     return path if path.endswith(".npz") else path + ".npz"
@@ -397,8 +398,8 @@ def build_trace_metrics(tab_config, truth: Optional[dict]) -> tuple:
 
     The optimiser loss is a negative log *joint*, so its prior term depends on
     the latent dimension of whichever model is running -- no gain parameters at
-    all under ``gains:UnitaryGains`` against ``2 n_ant - 2`` under
-    ``gains:ConstGains``, say. Two models' loss curves are therefore not on a
+    all under ``gains.UnitaryGains`` against ``2 n_ant - 2`` under
+    ``gains.ConstGains``, say. Two models' loss curves are therefore not on a
     common scale and cannot be compared directly. These quantities can: reduced
     chi^2 is fixed by the data, and the ast/rfi RMSE is measured against the
     simulation truth. Both use the same flag masking and noise normalisation as
@@ -529,7 +530,6 @@ def run_custom_svi(
     max_iter: int = 1_000,
     init_params: dict = None,
     epsilon: float = 1e-3,
-    dual_run: bool = True,
     state: dict = None,
     constants: dict = None,
     trace_path: Optional[str] = None,
@@ -567,17 +567,14 @@ def run_custom_svi(
     rank 0's, gated inside :func:`_write_loss_trace`.
 
     ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
-    is the optax optimiser each phase builds, ``adabelief`` when it is None.
+    is the optax optimiser to run, ``adabelief`` when it is None.
     ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
-    replaces the two phases with one optimiser whose step size follows it,
-    for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
-    means one compiled step and moments that carry through every step (#82).
-    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
-    ``checkpoints`` are steps, counted across both phases with ``dual_run``,
-    after which the parameters are written to ``checkpoint_path(step)``.
+    sets its step-size schedule over ``max_iter`` steps, or constant ``epsilon``
+    when None, with moments carrying through every step (#82).
+    ``stop`` ends the run early once :func:`tabascal.opt_schedule.converged`.
+    ``checkpoints`` are 1-based step counts after which the parameters are
+    written to ``checkpoint_path(step)``.
     """
-    if stop is not None and schedule is None:
-        raise ValueError("run_custom_svi takes a stop only with a schedule.")
     # Metrics without a path would compile and run the traced step for a
     # production run and then discard every number it cost.
     if trace_path is None:
@@ -585,8 +582,8 @@ def run_custom_svi(
 
     metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
 
-    # Wall-clock elapsed at the end of each iteration, measured from the first
-    # step of the first phase. Comparing two models by loss-per-iteration hides
+    # Wall-clock elapsed at the end of each iteration, measured from the start
+    # of the first step. Comparing two models by loss-per-iteration hides
     # any difference in cost per iteration, so a model that converges in fewer
     # but more expensive steps looks better than it is; the honest axis is time.
     # `float(loss)` below already forces a device sync, so the timestamp taken
@@ -598,80 +595,56 @@ def run_custom_svi(
 
     checkpoints = set(checkpoints)
 
-    def _run_phase(params, optimizer, max_iter, offset=0, learning_rate=None):
-        nonlocal trace_t0
-        opt_state = optimizer.init(params)
-        if learning_rate is not None:
-            hyperparams = opt_state.hyperparams
-            opt_state = opt_state._replace(hyperparams={
-                **hyperparams,
-                "learning_rate": jnp.asarray(learning_rate, hyperparams["learning_rate"].dtype),
-            })
-        # Placed as _map_step returns it, so the second step reuses the first one's
-        # executable instead of compiling again for a differently placed state.
-        opt_state = replicate_off_mesh(opt_state)
-        losses = []
-        window = max(max_iter // 10, 1)
-        init_loss = None
-        pbar = trange(max_iter, disable=not is_process_0())
-        for i in pbar:
-            if trace_t0 is None:
-                trace_t0 = perf_counter()
-            if metrics_fn is None:
-                params, opt_state, loss = _map_step(
-                    prob_model, optimizer, params, opt_state, state, constants, obs_data
-                )
-            else:
-                params, opt_state, loss, step_metrics = _map_step_metrics(
-                    prob_model, optimizer, metrics_fn, params, opt_state,
-                    state, constants, obs_data, metrics_data,
-                )
-                for name, value in step_metrics.items():
-                    traced_metrics.setdefault(name, []).append(float(value))
-            loss_val = float(loss)
-            step_times.append(perf_counter() - trace_t0)
-            losses.append(loss_val)
-            if init_loss is None:
-                init_loss = loss_val
-            start_idx = max(0, i + 1 - window)
-            avg_loss = sum(losses[start_idx:]) / len(losses[start_idx:])
-            n1 = start_idx + 1
-            n2 = i + 1
-            pbar.set_postfix_str(
-                f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
-                refresh=False,
-            )
-            if offset + i + 1 in checkpoints:
-                save_checkpoint(
-                    checkpoint_path(offset + i + 1), params, offset + i + 1, loss_val,
-                    write=is_process_0(),
-                )
-            # Every rank holds the same losses, so every rank stops at the same step.
-            if stop is not None and converged(losses, stop):
-                pbar.close()
-                print(f"Converged after {i + 1} steps: the mean loss moved by less "
-                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
-                break
-        return params, losses
+    lr = step_size(schedule, epsilon, max_iter) if schedule is not None else float(epsilon)
+    transform = build_optimizer(optimizer, lr)
 
     params = init_params
-    if schedule is not None:
-        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
-        params, losses = _run_phase(params, transform, max_iter)
-    else:
-        # The step size is a leaf of the optimiser state rather than a constant of
-        # the transform, so dual_run's second phase -- a fresh optimiser at a tenth
-        # of it -- runs the executable the first phase compiled.
-        transform = optax.inject_hyperparams(partial(build_optimizer, optimizer))(
-            learning_rate=float(epsilon)
-        )
-        params, losses = _run_phase(params, transform, max_iter)
-
-        if dual_run:
-            params, losses2 = _run_phase(
-                params, transform, max_iter, offset=max_iter, learning_rate=epsilon / 10
+    opt_state = transform.init(params)
+    # Placed as _map_step returns it, so the second step reuses the first one's
+    # executable instead of compiling again for a differently placed state.
+    opt_state = replicate_off_mesh(opt_state)
+    losses = []
+    window = max(max_iter // 10, 1)
+    init_loss = None
+    pbar = trange(max_iter, disable=not is_process_0())
+    for i in pbar:
+        if trace_t0 is None:
+            trace_t0 = perf_counter()
+        if metrics_fn is None:
+            params, opt_state, loss = _map_step(
+                prob_model, transform, params, opt_state, state, constants, obs_data
             )
-            losses = losses + losses2
+        else:
+            params, opt_state, loss, step_metrics = _map_step_metrics(
+                prob_model, transform, metrics_fn, params, opt_state,
+                state, constants, obs_data, metrics_data,
+            )
+            for name, value in step_metrics.items():
+                traced_metrics.setdefault(name, []).append(float(value))
+        loss_val = float(loss)
+        step_times.append(perf_counter() - trace_t0)
+        losses.append(loss_val)
+        if init_loss is None:
+            init_loss = loss_val
+        start_idx = max(0, i + 1 - window)
+        avg_loss = sum(losses[start_idx:]) / len(losses[start_idx:])
+        n1 = start_idx + 1
+        n2 = i + 1
+        pbar.set_postfix_str(
+            f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
+            refresh=False,
+        )
+        if i + 1 in checkpoints:
+            save_checkpoint(
+                checkpoint_path(i + 1), params, i + 1, loss_val,
+                write=is_process_0(),
+            )
+        # Every rank holds the same losses, so every rank stops at the same step.
+        if stop is not None and converged(losses, stop):
+            pbar.close()
+            print(f"Converged after {i + 1} steps: the mean loss moved by less "
+                  f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+            break
 
     _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
@@ -730,12 +703,13 @@ def run_opt(
 ):
 
     start = datetime.now()
-    opt_config = tab_config.args["opt"]
-    checked = validate_opt(opt_config)
+    opt_config = tab_config.config.opt
+    precision = getattr(tab_config, "precision", "double")
+    checked = validate_opt(opt_config, precision=precision)
     print()
     print("Running Optimization ...")
-    print(f"Optimiser : {describe_schedule(opt_config)}")
-    traced_path = loss_trace_path(opt_config.get("trace_path"))
+    print(f"Optimiser : {describe_schedule(opt_config, precision=precision)}")
+    traced_path = loss_trace_path(opt_config.trace_path)
     results_dir = os.path.dirname(os.path.normpath(map_path))
     # Every run keeps its loss and step times beside its results; asking for a
     # trace adds the metrics and puts the file where it was asked for instead.
@@ -747,10 +721,9 @@ def run_opt(
     vi_results = run_custom_svi(
         prob_model=prob_model,
         obs_data=tab_config.vis_obs,
-        max_iter=opt_config["max_iter"],
+        max_iter=opt_config.max_iter,
         init_params=init_params,
-        epsilon=opt_config["epsilon"],
-        dual_run=opt_config["dual_run"],
+        epsilon=opt_config.epsilon,
         state=state,
         constants=constants,
         trace_path=trace_path,
@@ -792,7 +765,8 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
     """Apply the run's MS export policy to either initial or fitted results."""
     # Both run routes already wrote the zarr. Keep its location visible when
     # the optional MS copy (including its calibration-table export) is skipped.
-    if tab_config.args["data"].get("skip_ms_write", False):
+    data_cfg = tab_config.config.data
+    if data_cfg.skip_ms_write:
         print(f"Skipping MS write; tabascal results are in {results_path}")
         return
     print(f"Copying tabascal results to MS file from {results_path}")
@@ -804,7 +778,7 @@ def write_ms_if_enabled(tab_config, ms_path, results_path):
     write_results_ms(
         ms_path,
         results_path,
-        tab_config.args["data"]["data_col"],
+        data_cfg.data_col,
         gain_table=getattr(tab_config, "gain_table", None),
-        row_chunk=tab_config.args["data"].get("row_chunk"),
+        row_chunk=data_cfg.row_chunk,
     )

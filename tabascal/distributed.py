@@ -124,7 +124,7 @@ RFI_AXIS_NAMES = frozenset({
     # state buffers
     "rfi_A", "rfi_phase", "rfi_xyz", "elements",
     # (n_rfi, n_ant, n_time, n_path) delay polynomial of the data-grid route,
-    # read beside rfi_A and rfi_phase by rfi_vis:AnalyticVis
+    # read beside rfi_A and rfi_phase by rfi_vis.AnalyticVis
     "rfi_delay_poly_us",
     # constants
     "mu_rfi_k", "mu_rfi_orbit", "L_rfi_orbit",
@@ -132,7 +132,7 @@ RFI_AXIS_NAMES = frozenset({
     # forwards. Sharded rather than replicated so that multiply stays elementwise
     # within each shard -- replicated, it would pull rfi_A back to a full copy.
     "rfi_mask_fine",
-    # (n_rfi, n_time) elevation mask of rfi_vis:AnalyticVis, which scans each
+    # (n_rfi, n_time) elevation mask of rfi_vis.AnalyticVis, which scans each
     # shard's own sources
     "rfi_mask",
 })

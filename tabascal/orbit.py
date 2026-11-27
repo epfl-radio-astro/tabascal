@@ -607,10 +607,10 @@ def _coverage_error(resolution: TLEResolution) -> TLEError:
         )
     lines += [
         "  - put an acceptable TLE for these satellites in a directory and pass "
-        "--extra-orbit-dir <dir> (or set satellites.extra_orbit_dir)",
-        "  - deliberately change satellites.remote_max_age_days (null removes "
+        "--extra-orbit-dir <dir> (or set extra_orbit_dir on the trajectory component)",
+        "  - deliberately change remote_max_age_days on the trajectory component (null removes "
         "the ceiling entirely; this is an expert opt-out, not a default)",
-        "  - remove these NORAD IDs from satellites.norad_ids",
+        "  - remove these NORAD IDs from the trajectory component's norad_ids",
         "",
         "TABASCAL will not silently omit a configured satellite from the RFI "
         "model: the run stops here rather than subtracting an incomplete one.",

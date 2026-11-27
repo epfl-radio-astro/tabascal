@@ -34,45 +34,56 @@ _OBS = jd(2023, 2, 21, 12, 30)
 # ---------------------------------------------------------------------------
 
 
-def _config(**satellites):
-    return {"model": {"components": []}, "satellites": satellites}
+def _config(**trajectory):
+    from tabascal.schema import validate_config
+
+    return validate_config(
+        {
+            "model": {
+                "components": [
+                    {"trajectory.FixedOrbitFine": trajectory},
+                ]
+            },
+        }
+    )
+
+
+def _no_orbit_config():
+    from tabascal.schema import validate_config
+
+    return validate_config({"model": {"components": []}})
 
 
 class TestConfigNormalisation:
 
-    def test_null_norad_ids_is_an_empty_list_not_a_traceback(self):
-        assert tle_config.normalise_tle_config(_config(norad_ids=None)).norad_ids == []
+    def test_null_norad_ids_with_no_orbit_component_is_an_empty_list(self):
+        assert tle_config.normalise_tle_config(_no_orbit_config()).norad_ids == []
 
-    @pytest.mark.parametrize("sep", [":", "."])
+    @pytest.mark.parametrize("sep", ["."])
     @pytest.mark.parametrize(
         "name", ["FixedOrbit", "FixedOrbitFine", "OrbitFine", "NoDragOrbitFine"]
     )
     def test_null_norad_ids_with_a_tle_model_is_a_clean_error(self, name, sep):
-        # import_components accepts both separators, so the guard has to see
-        # both. A dotted reference that slipped past it would leave the run
-        # modelling no satellites at all instead of stopping here.
-        config = {
-            "model": {"components": [f"trajectory{sep}{name}"]},
-            "satellites": {"norad_ids": None},
-        }
+        from tabascal.schema import validate_config
+
+        config = validate_config(
+            {
+                "model": {
+                    "precision": "double",
+                    "components": [{f"trajectory{sep}{name}": {"norad_ids": None}}],
+                },
+            }
+        )
         with pytest.raises(TLEConfigurationError, match="no NORAD catalogue IDs"):
             tle_config.normalise_tle_config(config)
 
     def test_the_guard_names_only_trajectories_that_exist(self):
-        """The hand-maintained list must not outlive a component it names.
-
-        A deleted or renamed trajectory left in it can send a config that names
-        the old class off to hunt for NORAD IDs it does not need, instead of
-        being told by the importer that the component is gone: under
-        ``model.precision: double`` this guard is reached first, since the
-        precision check that resolves the components returns early there.
-        """
         from tabascal.components import in_tree_components
 
         trajectories = {
-            ref.split(":")[1]
+            ref.split(".")[1]
             for ref in in_tree_components()
-            if ref.startswith("trajectory:")
+            if ref.startswith("trajectory.")
         }
         assert tle_config._TLE_TRAJECTORY_COMPONENTS <= trajectories
 
@@ -101,24 +112,28 @@ class TestConfigNormalisation:
     )
     @pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "soon", []])
     def test_malformed_ages_are_configuration_errors(self, field, value):
-        with pytest.raises(TLEConfigurationError, match=field):
-            tle_config.normalise_tle_config(_config(**{field: value}))
+        from tabascal.schema import ConfigValidationError
+
+        with pytest.raises((TLEConfigurationError, ConfigValidationError), match=field):
+            tle_config.normalise_tle_config(_config(norad_ids=[25544], **{field: value}))
 
     def test_cache_reuse_age_above_the_ceiling_is_a_configuration_error(self):
-        with pytest.raises(TLEConfigurationError, match="must not exceed"):
+        from tabascal.schema import ConfigValidationError
+
+        with pytest.raises((TLEConfigurationError, ConfigValidationError), match="must not exceed"):
             tle_config.normalise_tle_config(
-                _config(remote_max_age_days=1, cache_reuse_max_age_days=2)
+                _config(norad_ids=[25544], remote_max_age_days=1, cache_reuse_max_age_days=2)
             )
 
     def test_cache_reuse_age_equal_to_the_ceiling_is_allowed(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_max_age_days=2, cache_reuse_max_age_days=2)
+            _config(norad_ids=[25544], remote_max_age_days=2, cache_reuse_max_age_days=2)
         )
         assert cfg.cache_reuse_max_age_days == 2.0
 
     def test_cache_reuse_age_with_a_null_ceiling_is_allowed(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_max_age_days=None, cache_reuse_max_age_days=5)
+            _config(norad_ids=[25544], remote_max_age_days=None, cache_reuse_max_age_days=5)
         )
         assert cfg.cache_reuse_max_age_days == 5.0
 
@@ -130,7 +145,7 @@ class TestConfigNormalisation:
 
     def test_null_ages_are_explicit_opt_outs(self):
         cfg = tle_config.normalise_tle_config(
-            _config(remote_max_age_days=None, cache_reuse_max_age_days=None)
+            _config(norad_ids=[25544], remote_max_age_days=None, cache_reuse_max_age_days=None)
         )
         assert cfg.remote_max_age_days is None
         assert cfg.cache_reuse_max_age_days is None
@@ -189,6 +204,27 @@ class TestNoradIdFile:
             norad_ids_path_override=str(cli),
         )
         assert cfg.norad_ids == [999]
+
+    def test_plain_dict_reads_orbit_settings_from_trajectory_component(self, tmp_path):
+        raw = {
+            "model": {
+                "components": [
+                    {
+                        "trajectory.FixedOrbit": {
+                            "norad_ids": [25544, 38833],
+                            "extra_orbit_dir": str(tmp_path),
+                            "remote_max_age_days": 5.0,
+                            "cache_reuse_max_age_days": 2.0,
+                        }
+                    }
+                ]
+            }
+        }
+        cfg = tle_config.normalise_tle_config(raw)
+        assert cfg.norad_ids == [25544, 38833]
+        assert cfg.extra_orbit_dir == str(tmp_path)
+        assert cfg.remote_max_age_days == 5.0
+        assert cfg.cache_reuse_max_age_days == 2.0
 
 
 # ---------------------------------------------------------------------------

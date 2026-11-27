@@ -6,12 +6,12 @@ from jax import vmap, random, Array, lax, checkpoint
 import jax.numpy as jnp
 
 from tabascal.components import Component, assert_attr_shape
-from tabascal.config import TabConfig
 from tabascal.dist import standard_normal
 from tabascal.distributed import sharded_rfi_zeros
 from tabascal.ms import get_observation_data_type
-from tabascal.seeds import component_key, config_seed
-from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis, validate_cutoff, validate_gp_cov, validate_signal_type
+from tabascal.schema import HALF_BAND, HALF_DURATION, MAX_VIS, RFIGPConfig
+from tabascal.seeds import DEFAULT_SEED, component_key
+from tabascal.fft_gp import FROM_DATA, latent_to_signal_init, latent_to_signal, signal_to_latent_init, signal_to_latent, knee_from_corr_scale, rms_vis
 from tabascal.time import to_utc_mjd
 from tabascal.timing import measure_runtime
 
@@ -408,33 +408,10 @@ def read_true_rfi_A(sim_zarr_path: str, data_col: str, times: Array) -> Array:
         return jnp.zeros((xds.tle_sat_src.data[0], xds.n_ant, xds.n_freq, xds.n_time), dtype=complex)
 
 
-#: The ``rfi.gp_cov`` keys the model reads, and what each may be. Validated by
-#: :func:`tabascal.fft_gp.validate_gp_cov`, which every Fourier-domain GP in the
-#: model shares, so a bad value is refused the same way wherever it is written.
-#: The same keys the astronomical prior takes, except that its time scale is a
-#: field of view rather than a correlation time -- an RFI emitter's coherence
-#: time is a property of the emitter, so here it is the number itself.
+#: What the spectrum is normalised to, per unit of ``rfi_signal.std_jy``.
 #:
-#: Every key is optional, and each null has its own meaning, stated in the base
-#: configuration: the width falls back to #227's default, both correlation
-#: scales to half the observed extent on their axis -- where the sky reads
-#: ``corr_freq: null`` as no roll-off at all -- and ``gammas`` to this
-#: component's own, since the two Fourier components do not agree on theirs.
-#: See ``BaseGPRFI.default_gammas``.
-_GP_COV_RULES = {
-    "std": "amplitude",
-    "corr_freq": "number",
-    "corr_time": "number",
-    "gammas": "pair",
-}
-
-#: All of them: each has a default, and none has to be written down.
-_GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
-
-#: What the spectrum is normalised to, per unit of ``rfi.gp_cov.std``.
-#:
-#: ``rfi.gp_cov.std`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
-#: ``ast.gp_cov.std``, read off the data the same way. The two get there by
+#: ``rfi_signal.std_jy`` is the RFI's typical ``rms|V|`` in Jy -- the same quantity as
+#: ``GPVisAst.std_jy``, read off the data the same way. The two get there by
 #: different arithmetic, and this is where it differs: ``vis_ast``
 #: *is* the modelled quantity and is linear in its latent, while ``rfi_A`` is a
 #: per-antenna amplitude and the visibility is quadratic in it,
@@ -444,13 +421,13 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #: carries ``E|z|^2 = 2``. A linear model takes the square root of that into
 #: its width, so the astronomical prior divides by ``sqrt(2)``; a quadratic one
 #: passes the power through undiminished, so
-#: ``sum(sigma_rfi_k**2) = rfi.gp_cov.std / 2``.
+#: ``sum(sigma_rfi_k**2) = rfi_signal.std_jy / 2``.
 #:
 #: And that carries through the transform exactly. ``latent_to_signal`` pads
 #: the coefficients, inverts with ``norm="forward"`` and crops, so every
 #: retained coefficient reaches every output point with unit magnitude:
-#: ``E|A|^2 = 2 sum(sigma^2) = rfi.gp_cov.std``, and for the independent antennas of
-#: ``ComplexRFIVarAntFine``, ``E|V_pq|^2 = rfi.gp_cov.std^2``. Padding and cropping
+#: ``E|A|^2 = 2 sum(sigma^2) = rfi_signal.std_jy``, and for the independent antennas of
+#: ``ComplexRFIVarAntFine``, ``E|V_pq|^2 = rfi_signal.std_jy^2``. Padding and cropping
 #: change which modes exist and how they correlate, not the amplitude.
 #:
 #: It is an expectation, so a measured realisation scatters around it, by more
@@ -462,18 +439,18 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #: which is the width the prior is on rather than a prediction of what a run
 #: will see. Three model steps sit between the two, all of them intended:
 #:
-#: * A non-zero ``rfi.mean`` -- ``data``, ``est``, ``matched-filter`` -- adds
+#: * A non-zero ``rfi_signal.mean`` -- ``data``, ``est``, ``matched-filter`` -- adds
 #:   its own power: ``E|V_pq|^2 = (std + |m_p|^2)(std + |m_q|^2)`` for the mean
 #:   amplitudes ``m``. Sources then carry non-zero mean visibilities too, so
 #:   their total no longer generally scales as ``sqrt(N)``.
-#: * ``rfi.min_elevation`` zeroes a source while it is below the cut, so one
-#:   visible for a fraction ``f`` of the observation has ``std * sqrt(f)`` over
+#: * ``trajectory.min_elevation_deg`` zeroes a source while it is below the cut, so one
+#:   visible for a fraction ``f`` of the observation has ``std_jy * sqrt(f)`` over
 #:   the whole of it, and a source that never rises has exactly zero.
 #: * The visibility kernels average the fine grid, and fringes that turn within
 #:   an integration cancel there. How much depends on the spectrum's own
 #:   correlation in time and frequency.
 #:
-#: **Per source, and for this antenna structure.** ``rfi.gp_cov.std`` is one source's
+#: **Per source, and for this antenna structure.** ``rfi_signal.std_jy`` is one source's
 #: width, and two known factors sit between it and the visibility a run
 #: realises. ``ComplexRFIConstAntFine`` broadcasts one amplitude to every antenna,
 #: so its visibility is ``|A|^2`` rather than ``A_p conj(A_q)`` and
@@ -489,18 +466,18 @@ _GP_COV_OPTIONAL = tuple(_GP_COV_RULES)
 #: Measured, not derived: ``tests/components/test_rfi_signal.py`` samples each
 #: component through its own antenna structure and checks all three.
 #:
-#: Everything above is the complex signal space, the default. ``rfi.signal_type:
+#: Everything above is the complex signal space, the default. ``rfi_signal.signal_type:
 #: real`` has its own entry in :data:`_LATENT_POWER_BY_TYPE`; this constant also
-#: sets the ``std: null`` default, which is left meaning the same in both.
+#: sets the ``std_jy: max_vis`` default, which is left meaning the same in both.
 _LATENT_POWER = 2.0
 
-#: :data:`_LATENT_POWER` per ``rfi.signal_type``.
+#: :data:`_LATENT_POWER` per ``rfi_signal.signal_type``.
 #:
 #: A real amplitude is fitted through one real Hartley coefficient per mode
 #: (see :mod:`tabascal.fft_gp`), drawn as a single standard normal, so it
 #: carries ``E z^2 = 1`` and ``E A^2 = sum(sigma_rfi_k**2)``. The visibility of
 #: independent antennas is still quadratic in it, so ``sum(sigma**2) =
-#: rfi.gp_cov.std`` keeps ``E|V_pq|^2 = rfi.gp_cov.std^2``: the key means the
+#: rfi_signal.std_jy`` keeps ``E|V_pq|^2 = rfi_signal.std_jy^2``: the key means the
 #: same width in either space. What does differ is ConstAnt's factor: a real
 #: Gaussian has ``E A^4 = 3 (E A^2)^2``, so ``|A|^2`` there is ``sqrt(3)`` wider
 #: rather than ``sqrt(2)``.
@@ -530,15 +507,10 @@ def _latent_params(latent: Array, signal_type: str, suffix: str = "") -> Dict:
         out[f"rfi_k_i{suffix}"] = latent.imag
     return out
 
-def _validate_gp_cov(gp_cov) -> Dict:
-    """Normalise ``rfi.gp_cov`` to the keys the RFI components read."""
-    return validate_gp_cov(gp_cov, "rfi", _GP_COV_RULES, optional=_GP_COV_OPTIONAL)
-
-
 def _std_from_data(vis_obs, gain_flags) -> float:
     """``rms|V|`` of the observed visibilities, in Jy, as the RFI's width.
 
-    The same measurement as ``ast.gp_cov.std: data`` -- literally, they call
+    The same measurement as ``GPVisAst`` ``std_jy: data`` -- literally, they call
     the same :func:`tabascal.fft_gp.rms_vis`. What differs is which samples
     each prior can use, and there is one real difference, not the symmetry it
     looks like from a distance.
@@ -561,7 +533,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     carry no usable amplitude for anybody.
 
     A scalar rather than one per baseline, because that is what this prior
-    carries: the astronomical model has a width per baseline, ``rfi.gp_cov.std``
+    carries: the astronomical model has a width per baseline, ``std_jy``
     normalises a single spectrum.
 
     It measures the *total* RFI and hands it to each source, and does not
@@ -576,7 +548,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     RFI
     ``rms|V|`` of 11.0, because RFI that dominates the sky by 7x dominates the
     measurement as well. Where the RFI is faint it measures the sky instead
-    and is far too wide, which is the mirror of ``ast.gp_cov.std: data``'s
+    and is far too wide, which is the mirror of ``GPVisAst`` ``std_jy: data``'s
     own limitation and what GitHub #220 fixes for both.
 
     Both together still beat the width they replace, and by more than the
@@ -585,7 +557,6 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     realises about 19 Jy against a true 11.0, where the default's 46.4 realises
     about 80. Roughly 1.8x against 7.3x.
     """
-
     bad = (
         jnp.zeros(jnp.shape(vis_obs), dtype=bool)
         if gain_flags is None
@@ -593,7 +564,7 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     )
     keep = ~bad
 
-    std = float(rms_vis(vis_obs, keep, "rfi.gp_cov.std", per_baseline=False))
+    std = float(rms_vis(vis_obs, keep, "rfi_signal.std_jy", per_baseline=False))
 
     dropped = float(jnp.mean(bad))
     where = (
@@ -610,97 +581,62 @@ def _std_from_data(vis_obs, gain_flags) -> float:
     return std
 
 
-def rfi_signal_config_validation(rfi_config: Dict, vis_obs: Array, freqs: Array, chan_width: float, times: Array, int_time: float, gain_flags: Array = None) -> Dict:
-    """Validate and set defaults of BaseGPRFI class parameters in the configuration file.
+def resolve_rfi_gp_params(
+    cfg: RFIGPConfig,
+    vis_obs: Array,
+    freqs: Array,
+    chan_width: float,
+    times: Array,
+    int_time: float,
+    gain_flags: Optional[Array] = None,
+) -> Tuple[float, float, float]:
+    """Resolve data-dependent RFI GP parameters ``(std, corr_freq, corr_time)``.
 
-    Parameters
-    ----------
-    rfi_config : Dict
-        RFI configuration dictionary
-
-    Returns
-    -------
-    Dict
-        Validated configuration dictionary with defaults set.
-
-    Raises
-    ------
-    ValueError
-        Raised when an invalid input is provided for one fo the configuration parameters.
+    Each may name a value computed from the observation (``'data'`` and
+    ``'max_vis'``, ``'half_band'``, ``'half_duration'``), resolved here; the values themselves were checked when the config was validated, so a
+    width of zero, of -5, or of True never reaches the Fourier machinery.
     """
 
     def extent(x, dx):
         ext = float(jnp.max(x) - jnp.min(x))
-        if ext == 0.0:
-            return float(dx)
-        else:
-            return ext
+        return float(dx) if ext == 0.0 else ext
 
-    # The covariance keys go through the validator both Fourier-domain priors
-    # share, so a width of zero, of -5, or of True is refused here by name
-    # rather than accepted and carried into the Fourier machinery. Each may be
-    # null, and the fallbacks below are what null means.
-    gp_cov = _validate_gp_cov(rfi_config.get("gp_cov"))
-
-    if gp_cov["std"] == FROM_DATA:
-        gp_cov["std"] = _std_from_data(vis_obs, gain_flags)
-    elif gp_cov["std"] is None:
+    if cfg.std_jy == FROM_DATA:
+        std = _std_from_data(vis_obs, gain_flags)
+    elif cfg.std_jy == MAX_VIS:
         # _LATENT_POWER times the largest visibility. It is a maximum where the
-        # key says typical, which is GitHub #227.
-        gp_cov["std"] = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
+        # option says typical, which is GitHub #227.
+        std = _LATENT_POWER * float(jnp.max(jnp.abs(vis_obs)))
+    else:
+        std = float(cfg.std_jy)
 
-    # Half the observed extent on each axis. The astronomical prior reads the
-    # same null on corr_freq as no roll-off at all, and the difference is which
-    # default is the uninformative one. A flat delay spectrum is not a smooth
+    # Half the observed extent on each axis. The astronomical prior's corr_freq
+    # null is no roll-off at all, and the difference is which default is the
+    # uninformative one. A flat delay spectrum is not a smooth
     # signal -- equal power at every delay leaves the channels uncorrelated, so
     # it states no frequency structure rather than a gentle one. That costs
     # nothing on the single-channel observations the shipped configs run, where
     # the only delay mode is zero. Here the emitter is coherent over some band
     # by construction, so half the observation is the least-committal guess that
     # is still a coherence scale, rather than declining to name one.
-    if gp_cov["corr_freq"] is None:
-        gp_cov["corr_freq"] = extent(freqs, chan_width) / 2
-    if gp_cov["corr_time"] is None:
-        gp_cov["corr_time"] = extent(times, int_time) / 2
-
-    rfi_config["gp_cov"] = gp_cov
-
-    # Real or complex RFI amplitude. Complex is the model; real is there to
-    # compare against and to verify with, and is fitted through the same FFTs.
-    rfi_config["signal_type"] = validate_signal_type(
-        rfi_config.get("signal_type"), "rfi.signal_type"
-    )
+    corr_freq = extent(freqs, chan_width) / 2 if cfg.corr_freq_hz == HALF_BAND else float(cfg.corr_freq_hz)
+    corr_time = extent(times, int_time) / 2 if cfg.corr_time_s == HALF_DURATION else float(cfg.corr_time_s)
 
     print()
-    print(f"Using RFI gp_cov.std : {gp_cov['std']:.1e} Jy (rms|V|)")
-    print(f"Using RFI gp_cov.corr_freq : {gp_cov['corr_freq']/1e3:.1f} kHz")
-    print(f"Using RFI gp_cov.corr_time : {gp_cov['corr_time']:.1f} s")
-    print(f"Using RFI signal_type : {rfi_config['signal_type']}")
+    print(f"Using RFI std : {std:.1e} Jy (rms|V|)")
+    print(f"Using RFI corr_freq : {corr_freq / 1e3:.1f} kHz")
+    print(f"Using RFI corr_time : {corr_time:.1f} s")
+    print(f"Using RFI signal_type : {cfg.signal_type}")
 
-    return rfi_config
+    return std, corr_freq, corr_time
 
 
 class BaseGPRFI(Component):
 
-    #: The tag ``rfi.init: sample`` folds into ``inference.seed`` (tabascal.seeds).
+    Config = RFIGPConfig
+
+    #: The tag ``init: sample`` folds into ``seed`` (tabascal.seeds).
     seed_tag = "rfi"
-
-    #: Roll-off exponent of the RFI prior power spectrum on the frequency and time
-    #: axes, used when ``rfi.gp_cov.gammas`` is not set. Declared per component
-    #: because the two Fourier components have never agreed on it: the difference
-    #: looks historical rather than intentional (#111), and is preserved here
-    #: rather than unified, which would be a model change for one of them.
-    #: Written as ints, which is what these were before they were configurable:
-    #: jax routes an integer exponent through ``lax.integer_pow`` and a float one
-    #: through ``lax.pow``, and the two differ in the last bit. That is far below
-    #: anything the model cares about, but it is the difference between "the
-    #: default path is unchanged" and "the default path is nearly unchanged".
-    default_gammas = [3, 3]
-
-    #: Relative power below which a k-mode is dropped from the latent grid, used
-    #: when ``rfi.cutoff`` is not set. Sets the latent dimension, so a
-    #: change here changes the number of fitted parameters.
-    default_pk_cutoff = 1e-9
 
     #: Whether the inverse transform supersamples onto the fine grid. The
     #: data-grid signals turn it off: the same latent, prior and parameters,
@@ -722,33 +658,14 @@ class BaseGPRFI(Component):
     def gp_cov_params(self):
         """``(gammas, cutoff)`` for this component: the config's, else its own.
 
-        ``gammas`` comes from the covariance block and ``cutoff`` from the
-        section around it, which is where it belongs: it decides how many modes
-        are fitted rather than what the prior believes, and the spectrum is
-        normalised after the cut so it does not set the width either.
-
-        Resolved once in :meth:`setup` rather than on each call, so that a
+        ``cutoff`` decides how many modes are fitted rather than what the prior
+        believes, and the spectrum is normalised after the cut, so it does not
+        set the width either. Both are resolved once in :meth:`setup`, and a
         cutoff of 1 -- which cuts every mode and leaves nothing to fit -- is
-        refused alongside every other configuration error rather than on the
-        first forward pass, now that the key no longer sits in the block
-        :func:`rfi_signal_config_validation` checks.
+        refused when the config is validated rather than on the first forward
+        pass.
         """
         return list(self._gammas), float(self._pk_cutoff)
-
-    def _resolve_gp_cov_params(self):
-        """``(gammas, cutoff)`` from the config, falling back to this component.
-
-        The block is validated in :func:`rfi_signal_config_validation`, so its
-        ``gammas`` is either ``None`` or already the right shape; the cutoff is
-        checked here, being the one covariance-adjacent key outside the block.
-        """
-        gp_cov = self.rfi_config.get("gp_cov") or {}
-        gammas = gp_cov.get("gammas") or list(self.default_gammas)
-        cutoff = validate_cutoff(
-            self.rfi_config.get("cutoff"), "rfi.cutoff", self.default_pk_cutoff
-        )
-
-        return list(gammas), float(cutoff)
 
     # The required state parameter needed in the forward model for this component to function
     required_inputs = {}  # No inputs needed
@@ -761,26 +678,28 @@ class BaseGPRFI(Component):
     # The base parameter shapes used to produce the output parameters
     parameter_shapes = {}
 
-    def setup(self, tab_config: TabConfig):
-
-        # Validate config and set defaults
-        rfi_config = rfi_signal_config_validation(
-            tab_config.args["rfi"], tab_config.vis_obs, tab_config.freqs, tab_config.chan_width, tab_config.times, tab_config.int_time,
+    def setup(self, tab_config):
+        cfg = self.config
+        std, corr_freq, corr_time = resolve_rfi_gp_params(
+            cfg,
+            tab_config.vis_obs,
+            tab_config.freqs,
+            tab_config.chan_width,
+            tab_config.times,
+            tab_config.int_time,
             # Only the uncalibratable samples: the MS's own flags stay in,
             # since a flag does not say the RFI is there. Read by std: data
             # alone -- see _std_from_data.
-            getattr(tab_config, "gain_flags", None))
+            getattr(tab_config, "gain_flags", None),
+        )
 
-        # The validated rfi section, kept whole: the covariance parameters come
-        # from its gp_cov block and the cutoff beside it, both falling back to
-        # this component's own defaults.
-        self.rfi_config = rfi_config
-        self._gammas, self._pk_cutoff = self._resolve_gp_cov_params()
+        self._gammas = list(cfg.gammas)
+        self._pk_cutoff = float(cfg.cutoff)
 
         # Real or complex amplitude. A real one is fitted through its Hartley
         # coefficients alone, so the imaginary base parameter is not declared
         # -- per instance, as gains.ConstGains does with its own.
-        self.signal_type = rfi_config["signal_type"]
+        self.signal_type = cfg.signal_type
         self._latent_dtype = complex if self.signal_type == "complex" else float
         self.parameter_shapes = {
             name: shape
@@ -789,7 +708,13 @@ class BaseGPRFI(Component):
         }
 
         # Seed for `init: sample`, drawn from under this component's own tag
-        self.seed = config_seed(tab_config.args)
+        run_cfg = getattr(tab_config, "config", None)
+        if hasattr(tab_config, "seed"):
+            self.seed = tab_config.seed
+        elif run_cfg is not None:
+            self.seed = run_cfg.seed
+        else:
+            self.seed = DEFAULT_SEED
 
         # Basic shape parameters 
         self.n_rfi = tab_config.n_rfi
@@ -821,14 +746,13 @@ class BaseGPRFI(Component):
         self.est_times_mjd = to_utc_mjd(tab_config.times_mjd, tab_config.time_scale)
         self.int_time = tab_config.int_time
 
-        # The spectrum normalises to this; rfi.gp_cov.std is what it produces.
-        # See _LATENT_POWER for why the two differ by exactly that factor, and
+        # The spectrum normalises to this; std is what it produces. See
+        # _LATENT_POWER for why the two differ by exactly that factor, and
         # _LATENT_POWER_BY_TYPE for the real signal space's.
-        gp_cov = rfi_config["gp_cov"]
-        self.rfi_std = gp_cov["std"]
+        self.rfi_std = std
         self.gp_var = self.rfi_std / _LATENT_POWER_BY_TYPE[self.signal_type]
-        self.corr_freq = gp_cov["corr_freq"]
-        self.corr_time = gp_cov["corr_time"]
+        self.corr_freq = corr_freq
+        self.corr_time = corr_time
 
         # Real (unpadded) source count. Under device sharding n_rfi is padded up to a
         # multiple of the device count with dark dummy sources; every prior mean and
@@ -842,7 +766,7 @@ class BaseGPRFI(Component):
         # inherit its mask and are zeroed independently by masked_forward_transform.
         # Stored as a boolean, which is what jnp.where in the forward wants and is
         # the smallest thing to shard. A data-grid signal is left unmasked:
-        # rfi_vis:AnalyticVis interpolates it across the horizon and masks each
+        # rfi_vis.AnalyticVis interpolates it across the horizon and masks each
         # source's visibility instead.
         rfi_mask_fine = getattr(tab_config, "rfi_mask_fine", None) if self.supersample else None
         self.rfi_mask_fine = (
@@ -936,7 +860,7 @@ class BaseGPRFI(Component):
         return self._zero_pad_rfi(vmap(vmap(self.signal_to_latent))(est_rfi_A))
 
     def _read_estimate(self, est_path):
-        """Seed from a measured light-curve file (``rfi.est``)."""
+        """Seed from a measured light-curve file (``rfi_signal.est``)."""
         # Real satellites only; _zero_pad_rfi restores the padded rows as zeros,
         # so a duplicate id is never reported as a missing one.
         return self._rfi_k_from_light_curves(
@@ -953,7 +877,7 @@ class BaseGPRFI(Component):
 
         The same estimate as ``est``, computed from the data already in memory:
         no imaging step, no light-curve file, and no title matching, since the
-        curves come back ordered to match ``satellites.norad_ids``.
+        curves come back ordered to match the trajectory component's ``norad_ids``.
 
         Imported lazily so that a run not using this option pays nothing for the
         estimator's skyfield/propagation imports, and memoised so a config asking
@@ -998,7 +922,7 @@ class BaseGPRFI(Component):
         total = rms(rfi_A)
         lost = rms(rfi_A.imag) / total if total else 0.0
         print(
-            "Warning: rfi.signal_type is real, so the true RFI amplitude is "
+            "Warning: rfi_signal.signal_type is real, so the true RFI amplitude is "
             f"taken as its real part; rms Im / rms |A| = {lost:.3g} is discarded."
         )
         return rfi_A.real
@@ -1048,29 +972,32 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         """All validation and error-prone operations here"""
         try:
             super().setup(tab_config)
+            cfg = self.config
             self.vis_obs = tab_config.vis_obs
 
-            self.time_pad_factor = tab_config.args["rfi"]["time_pad_factor"]
-            self.freq_pad_factor = tab_config.args["rfi"]["freq_pad_factor"]
+            self.time_pad_factor = cfg.time_pad_factor
+            self.freq_pad_factor = cfg.freq_pad_factor
 
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params(
-                tab_config.args["rfi"]["mean"],
+                cfg.mean,
                 tab_config.vis_obs,
-                tab_config.args["rfi"]["est"],
+                cfg.est,
                 tab_config,
             )
             self._set_outputs()
 
-            if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
-                self._compute_true_params(
-                    tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
-                )
+            run_cfg = getattr(tab_config, "config", None)
+            plots_truth = bool(getattr(getattr(run_cfg, "plots", None), "truth", False))
+            if plots_truth or cfg.init == "truth":
+                truth_zarr = getattr(getattr(run_cfg, "data", None), "truth_zarr", None)
+                data_col = getattr(getattr(run_cfg, "data", None), "data_col", "DATA")
+                self._compute_true_params(truth_zarr, data_col)
 
             self._compute_init_params(
-                tab_config.args["rfi"]["init"],
-                tab_config.args["rfi"]["est"],
+                cfg.init,
+                cfg.est,
                 tab_config,
             )
 
@@ -1253,7 +1180,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type in ["matched-filter", "mf"]:
+        elif prior_type == "matched-filter":
             print("Using matched-filter estimate for RFI prior mean")
             self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
@@ -1291,7 +1218,7 @@ class ComplexRFIVarAntFine(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
-        elif init_type in ["matched-filter", "mf"]:
+        elif init_type == "matched-filter":
             print("Using matched-filter estimate for rfi_A init")
             self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":
@@ -1360,10 +1287,6 @@ class ComplexRFIVarAnt(ComplexRFIVarAntFine):
 
 class ComplexRFIConstAntFine(BaseGPRFI):
 
-    # Its own historical values, unchanged by the wiring: see BaseGPRFI.
-    default_gammas = [1e2, 1e2]
-    default_pk_cutoff = 1e-6
-
     required_inputs = {}  # No inputs needed
     output_shapes = {
         "rfi_A": ("n_rfi", "n_ant", "n_freq_fine", "n_time_fine"),
@@ -1379,29 +1302,32 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         """All validation and error-prone operations here"""
         try:
             super().setup(tab_config)
+            cfg = self.config
             self.vis_obs = tab_config.vis_obs
 
-            self.time_pad_factor = tab_config.args["rfi"]["time_pad_factor"]
-            self.freq_pad_factor = tab_config.args["rfi"]["freq_pad_factor"]
+            self.time_pad_factor = cfg.time_pad_factor
+            self.freq_pad_factor = cfg.freq_pad_factor
 
             # Do expensive setup operations once
             self._compute_gp_params()
             self._compute_prior_params(
-                tab_config.args["rfi"]["mean"],
+                cfg.mean,
                 tab_config.vis_obs,
-                tab_config.args["rfi"]["est"],
+                cfg.est,
                 tab_config,
             )
             self._set_outputs()
 
-            if tab_config.args["plots"]["truth"] or tab_config.args["rfi"]["init"] == "truth":
-                self._compute_true_params(
-                    tab_config.args["data"]["zarr_path"], tab_config.args["data"]["data_col"]
-                )
+            run_cfg = getattr(tab_config, "config", None)
+            plots_truth = bool(getattr(getattr(run_cfg, "plots", None), "truth", False))
+            if plots_truth or cfg.init == "truth":
+                truth_zarr = getattr(getattr(run_cfg, "data", None), "truth_zarr", None)
+                data_col = getattr(getattr(run_cfg, "data", None), "data_col", "DATA")
+                self._compute_true_params(truth_zarr, data_col)
 
             self._compute_init_params(
-                tab_config.args["rfi"]["init"],
-                tab_config.args["rfi"]["est"],
+                cfg.init,
+                cfg.est,
                 tab_config,
             )
 
@@ -1565,7 +1491,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         elif prior_type == "est":
             print("Using provided estimate for RFI prior mean")
             self.mu_rfi_k = self._read_estimate(est_path)
-        elif prior_type in ["matched-filter", "mf"]:
+        elif prior_type == "matched-filter":
             print("Using matched-filter estimate for RFI prior mean")
             self.mu_rfi_k = self._matched_filter_estimate(tab_config)
         elif prior_type in ["zeros", 0]:
@@ -1615,7 +1541,7 @@ class ComplexRFIConstAntFine(BaseGPRFI):
         elif init_type == "est":
             print("Using provided estimate for rfi_A init")
             self.init_rfi_k = self._read_estimate(est_path)
-        elif init_type in ["matched-filter", "mf"]:
+        elif init_type == "matched-filter":
             print("Using matched-filter estimate for rfi_A init")
             self.init_rfi_k = self._matched_filter_estimate(tab_config)
         elif init_type == "truth":

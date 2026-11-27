@@ -1,17 +1,11 @@
 """One optimiser for the whole fit: its kind, a step-size schedule, a stop and checkpoints.
 
-``opt.dual_run`` fits in two phases. The second restarts the optimiser at a
-tenth of the step size, from fresh moments, which GitHub #82 reports as a
-bump in the loss at the switch. ``opt.schedule`` builds one optimiser whose
-step size follows a schedule instead, with moments that run through every
-step.
-
-``opt.optimizer`` picks the optax optimiser and its hyperparameters, with
-or without a schedule, and can clip the gradient's global norm. ``opt.stop``
-ends the fit once the loss has stopped moving, and ``opt.checkpoints`` writes
-the parameters at given steps, so one long run can be scored at several step
-counts. All four are off by default, and with all four off the optimiser is the
-two-phase ``adabelief`` it always was.
+``opt.optimizer`` picks the optax optimiser and its hyperparameters (``adabelief``
+by default) and can clip the gradient's global norm. ``opt.schedule`` varies its
+step size over the fit (constant ``epsilon`` when null), with moments that run
+through every step. ``opt.stop`` ends the fit once the loss has stopped moving,
+and ``opt.checkpoints`` writes the parameters at given steps, so one long run can
+be scored at several step counts. All four are off by default.
 """
 
 import inspect
@@ -25,13 +19,11 @@ import numpy as np
 import optax
 
 from tabascal.distributed import fail_together
+from tabascal.schema import OPTIMIZER_NAMES
 
 #: The optax optimisers ``opt.optimizer.name`` names. Each takes the step size
 #: as its first argument; their other scalar arguments may be set in the config.
-OPTIMIZERS = (
-    "adabelief", "adam", "adamw", "amsgrad", "nadam", "radam", "adamax", "yogi",
-    "lion", "lamb", "novograd", "rmsprop", "sgd", "adagrad",
-)
+OPTIMIZERS = OPTIMIZER_NAMES
 
 #: Arguments of those optimisers that are not scalars a YAML file can give.
 _NOT_FROM_CONFIG = (
@@ -74,13 +66,34 @@ _WARMUP_KEYS = {"warmup_steps": 0, "warmup_factor": 0.0}
 _STOP_KEYS = {"window": None, "rtol": None, "min_steps": 0}
 
 
-def _number(value, key: str, low: float, high: float = math.inf, low_open=False, high_open=False) -> float:
+def _as_opt_dict(opt_config) -> Dict:
+    """Normalise an :class:`OptConfig` or plain dict to a plain dict."""
+    if hasattr(opt_config, "to_yaml_dict"):
+        return opt_config.to_yaml_dict()
+    return opt_config
+
+
+def _number(
+    value,
+    key: str,
+    low: float,
+    high: float = math.inf,
+    low_open=False,
+    high_open=False,
+    *,
+    precision: Optional[str] = None,
+) -> float:
     # A bool is a Real to Python, and `factor: true` was not meant as 1.
     ok = not isinstance(value, bool) and isinstance(value, Real)
     if ok:
         # Checked as the run will hold it: in single precision b1: 0.99999999
         # is 1, 1e40 is inf, and a positive 1e-40 is a subnormal that flushes to 0.
-        dtype = np.float64 if jax.config.read("jax_enable_x64") else np.float32
+        if precision == "double":
+            dtype = np.float64
+        elif precision == "single":
+            dtype = np.float32
+        else:
+            dtype = np.float64 if jax.config.read("jax_enable_x64") else np.float32
         with np.errstate(over="ignore"):
             held = float(np.asarray(value, dtype=dtype))
         ok = (
@@ -117,7 +130,7 @@ def _keys(section, allowed: Dict, key: str) -> Dict:
     return out
 
 
-def validate_optimizer(optimizer) -> Optional[Dict]:
+def validate_optimizer(optimizer, *, precision: Optional[str] = None) -> Optional[Dict]:
     """``opt.optimizer`` as ``{name, clip_norm, args}``, or None when it is off.
 
     A name alone (``adam``) is that optimiser with optax's defaults; a mapping
@@ -136,7 +149,7 @@ def validate_optimizer(optimizer) -> Optional[Dict]:
         raise ValueError(f"opt.optimizer.name must be one of {list(OPTIMIZERS)}, not {name!r}.")
     clip_norm = args.pop("clip_norm", None)
     if clip_norm is not None:
-        clip_norm = _number(clip_norm, "optimizer.clip_norm", 0, low_open=True)
+        clip_norm = _number(clip_norm, "optimizer.clip_norm", 0, low_open=True, precision=precision)
 
     params = inspect.signature(getattr(optax, name)).parameters
     allowed = sorted(k for k in params if k not in _NOT_FROM_CONFIG)
@@ -154,7 +167,8 @@ def validate_optimizer(optimizer) -> Optional[Dict]:
         elif not (value is None and default is None):
             low, high, low_open = _ARG_RANGES[key]
             args[key] = _number(
-                value, f"optimizer.{key}", low, high, low_open=low_open, high_open=high < math.inf
+                value, f"optimizer.{key}", low, high,
+                low_open=low_open, high_open=high < math.inf, precision=precision,
             )
     if name == "rmsprop" and args.get("centered") and args.get("bias_correction"):
         # Bias-correcting the mean and the square separately can leave their
@@ -177,7 +191,7 @@ def build_optimizer(optimizer: Optional[Dict], learning_rate) -> optax.GradientT
     return transform
 
 
-def validate_schedule(schedule, max_iter: int) -> Optional[Dict]:
+def validate_schedule(schedule, max_iter: int, *, precision: Optional[str] = None) -> Optional[Dict]:
     """``opt.schedule`` with its defaults filled in, or None when it is off."""
     if schedule is None:
         return None
@@ -196,7 +210,7 @@ def validate_schedule(schedule, max_iter: int) -> Optional[Dict]:
         raise ValueError(
             f"opt.schedule.warmup_steps ({warmup}) must stay below max_iter ({max_iter})."
         )
-    out["warmup_factor"] = _number(out["warmup_factor"], "schedule.warmup_factor", 0, 1)
+    out["warmup_factor"] = _number(out["warmup_factor"], "schedule.warmup_factor", 0, 1, precision=precision)
 
     if kind == "step":
         boundaries = out["boundaries"]
@@ -216,32 +230,30 @@ def validate_schedule(schedule, max_iter: int) -> Optional[Dict]:
                     f"opt.schedule.factor must be one number, or one per boundary "
                     f"({len(boundaries)}), not {factor!r}."
                 )
-            out["factor"] = [_number(f, "schedule.factor", 0, low_open=True) for f in factor]
+            out["factor"] = [_number(f, "schedule.factor", 0, low_open=True, precision=precision) for f in factor]
         else:
-            out["factor"] = _number(factor, "schedule.factor", 0, low_open=True)
+            out["factor"] = _number(factor, "schedule.factor", 0, low_open=True, precision=precision)
     elif kind == "exponential":
-        out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1, low_open=True)
+        out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1, low_open=True, precision=precision)
     elif kind in ("cosine", "linear"):
-        out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1)
+        out["final_factor"] = _number(out["final_factor"], "schedule.final_factor", 0, 1, precision=precision)
     return {"kind": kind, **out}
 
 
-def validate_stop(stop) -> Optional[Dict]:
+def validate_stop(stop, *, precision: Optional[str] = None) -> Optional[Dict]:
     """``opt.stop`` with its defaults filled in, or None when it is off."""
     if stop is None:
         return None
     out = _keys(stop, _STOP_KEYS, "stop")
     out["window"] = _count(out["window"], "stop.window", 1)
-    out["rtol"] = _number(out["rtol"], "stop.rtol", 0, low_open=True)
+    out["rtol"] = _number(out["rtol"], "stop.rtol", 0, low_open=True, precision=precision)
     out["min_steps"] = _count(out["min_steps"], "stop.min_steps", 0)
     return out
 
 
-def total_steps(opt_config: Dict) -> int:
-    """Steps the fit runs if nothing stops it: one phase with a schedule, else one or two."""
-    if opt_config.get("schedule") is not None:
-        return opt_config["max_iter"]
-    return opt_config["max_iter"] * (2 if opt_config["dual_run"] else 1)
+def total_steps(opt_config) -> int:
+    """Steps the fit runs if nothing stops it: ``max_iter``, however it is phased."""
+    return _as_opt_dict(opt_config)["max_iter"]
 
 
 def validate_checkpoints(checkpoints, n_steps: int) -> List[int]:
@@ -259,23 +271,16 @@ def validate_checkpoints(checkpoints, n_steps: int) -> List[int]:
     return steps
 
 
-def validate_opt(opt_config: Dict) -> Dict:
+def validate_opt(opt_config, *, precision: Optional[str] = None) -> Dict:
     """Check ``opt.optimizer``, ``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` before the run starts.
 
-    Returns them normalised, under the same keys. ``stop`` needs ``schedule``:
-    with ``dual_run`` it is not clear whether a stop should end the first
-    phase or the fit.
+    Returns them normalised, under the same keys.
     """
+    opt_config = _as_opt_dict(opt_config)
     max_iter = opt_config["max_iter"]
-    optimizer = validate_optimizer(opt_config.get("optimizer"))
-    schedule = validate_schedule(opt_config.get("schedule"), max_iter)
-    stop = validate_stop(opt_config.get("stop"))
-    if stop is not None and schedule is None:
-        raise ValueError(
-            "opt.stop needs opt.schedule: with the two-phase dual_run optimiser it is "
-            "not clear whether it should end the first phase or the fit. Set a "
-            "schedule, e.g. {kind: step, boundaries: [N], factor: 0.1} for dual_run's drop."
-        )
+    optimizer = validate_optimizer(opt_config.get("optimizer"), precision=precision)
+    schedule = validate_schedule(opt_config.get("schedule"), max_iter, precision=precision)
+    stop = validate_stop(opt_config.get("stop"), precision=precision)
     checkpoints = validate_checkpoints(opt_config.get("checkpoints"), total_steps(opt_config))
     return {"optimizer": optimizer, "schedule": schedule, "stop": stop, "checkpoints": checkpoints}
 
@@ -285,7 +290,7 @@ def step_size(schedule: Dict, epsilon: float, max_iter: int):
 
     Evaluated at the optimiser's count, the number of steps already taken, so a
     ``step`` boundary at N keeps the first N steps at ``epsilon`` and drops from
-    step N + 1 on -- where ``dual_run`` drops for ``max_iter: N``.
+    step N + 1 on.
 
     A warmup of W steps rises linearly from ``warmup_factor * epsilon`` and
     reaches ``epsilon`` at step W + 1. The decays then run over the remaining
@@ -314,10 +319,11 @@ def step_size(schedule: Dict, epsilon: float, max_iter: int):
     return optax.join_schedules([rise, main], [warmup])
 
 
-def describe_schedule(opt_config: Dict) -> str:
+def describe_schedule(opt_config, *, precision: Optional[str] = None) -> str:
     """The optimiser as the run log names it."""
+    opt_config = _as_opt_dict(opt_config)
     epsilon, max_iter = opt_config["epsilon"], opt_config["max_iter"]
-    checked = validate_opt(opt_config)
+    checked = validate_opt(opt_config, precision=precision)
     optimizer, schedule = checked["optimizer"], checked["schedule"]
     name = "adabelief" if optimizer is None else optimizer["name"]
     if optimizer is not None:
@@ -328,8 +334,6 @@ def describe_schedule(opt_config: Dict) -> str:
             name += f" ({', '.join(settings)})"
     if schedule is None:
         line = f"{name}, step size {epsilon:g} for {max_iter} steps"
-        if opt_config["dual_run"]:
-            line += f", then a new {name.split(' ')[0]} at {epsilon / 10:g} for {max_iter} (dual_run)"
     else:
         kind = schedule["kind"]
         factor = schedule.get("factor")

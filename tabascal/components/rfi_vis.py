@@ -1,8 +1,9 @@
-from math import isfinite
+from typing import Any, Literal, Optional
 
 import jax.numpy as jnp
 from jax import lax
 import numpy as np
+from pydantic import Field, field_validator, model_validator
 
 from tabascal.distributed import psum_over_rfi, sharding_enabled
 from tabascal.interferometry import (
@@ -11,29 +12,108 @@ from tabascal.interferometry import (
 )
 from tabascal.components import Component
 from tabascal.poly_interp import fine_offsets, interp_tables, monomial_tables
+from tabascal.schema import (
+    FineTimeIntegrationMixin,
+    FreqIntegrationMixin,
+    PositiveInt,
+    StrictInt,
+    VariableFineTimeIntegrationMixin,
+    WholePositiveInt,
+)
 from ri_kernels.jax_api import RFIAnalyticVisOp, RFIVisOp
 
 
-def _read_backend(config, backends):
-    """The ``rfi.backend`` a component runs, from the ones it has, default first.
+_BACKEND_DESCRIPTION = (
+    "Implementation of the visibility: 'ffi' (ri_kernels compiled op with its own "
+    "JVP and transpose) or 'jax' (pure JAX reference implementation). See docs/kernels.md."
+)
 
-    ``jax`` is the visibility written in JAX and differentiated by it; ``ffi``
-    is the compiled ``ri_kernels`` op, with its own JVP and transpose. A null
-    or absent key is the component's default.
-    """
-    backend = config.args["rfi"].get("backend")
-    if backend is None:
-        return backends[0]
-    if backend not in backends:
-        raise ValueError(
-            f"rfi.backend must be one of {', '.join(map(repr, backends))} or null "
-            f"for this component, got {backend!r}."
-        )
-    return backend
+
+class RiemannVisFineConfig(FineTimeIntegrationMixin):
+    """Configuration for :class:`RiemannVisFine`."""
+
+    backend: Literal["ffi", "jax"] = Field(
+        default="ffi",
+        description=_BACKEND_DESCRIPTION,
+    )
+    baseline_block_size: Optional[WholePositiveInt] = Field(
+        default=128,
+        description=(
+            "Baselines handled per scan step with backend 'jax', or null for one block "
+            "over every baseline. Ignored by the FFI kernels."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _block_size_needs_jax(self) -> "RiemannVisFineConfig":
+        if self.backend != "jax" and "baseline_block_size" in self.model_fields_set:
+            raise ValueError(
+                f"baseline_block_size is read only with backend: jax; the {self.backend} "
+                "kernels bound the same memory themselves. Leave it out, or set backend: jax."
+            )
+        return self
+
+    def to_yaml_dict(self) -> dict[str, Any]:
+        dumped = super().to_yaml_dict()
+        if self.backend != "jax":
+            dumped.pop("baseline_block_size")
+        return dumped
+
+
+
+class RiemannVisVariableFineConfig(VariableFineTimeIntegrationMixin):
+    """Configuration for :class:`RiemannVisVariableFine`."""
+
+    backend: Literal["ffi", "jax"] = Field(
+        default="ffi",
+        description=_BACKEND_DESCRIPTION,
+    )
+
+
+class AnalyticVisConfig(FreqIntegrationMixin):
+    """Configuration for :class:`AnalyticVis`."""
+
+    # Only the compiled op for now: the JAX reference lands with it in
+    # ri_kernels and becomes the second backend then.
+    backend: Literal["ffi"] = Field(
+        default="ffi",
+        description="Implementation of the visibility: currently only 'ffi' (ri_kernels).",
+    )
+    stencil: StrictInt = Field(
+        default=1,
+        ge=0,
+        le=4,
+        description=(
+            "Half-width h of the signal interpolant: the polynomial through the 2h + 1 "
+            "nearest cells on each axis. 0 holds each cell's value."
+        ),
+    )
+    segments: StrictInt = Field(
+        default=2,
+        ge=1,
+        le=1024,
+        description="Equal pieces [-1, 1] is split into for the time integral.",
+    )
+    terms: StrictInt = Field(
+        default=6,
+        ge=1,
+        le=32,
+        description="Terms of the curvature series.",
+    )
+    cubic_terms: StrictInt = Field(
+        default=3,
+        ge=0,
+        le=8,
+        description="Terms of the residual cubic series; 0 drops the cubic phase.",
+    )
+    scratch_mb: PositiveInt = Field(
+        default=256,
+        description="Bound on the GPU coefficient scratch in MiB; ignored on CPU.",
+    )
 
 
 class RiemannVisFine(Component):
-    """Riemann-sum RFI visibilities on the fine grid, through ``rfi.backend``.
+    """Riemann-sum RFI visibilities on the fine grid, through ``RiemannVisFine.backend``.
 
     ``ffi``, the default, is ``ri_kernels``' compiled ``RFIVisOp``, which bounds
     the fine grid inside the kernel and reads no block size. See
@@ -41,7 +121,7 @@ class RiemannVisFine(Component):
 
     ``jax`` is the reference implementation, the one ``ffi`` is validated
     against in value, forward mode and reverse mode. It walks the
-    baseline axis in blocks of ``rfi.baseline_block_size`` under ``checkpoint``
+    baseline axis in blocks of ``RiemannVisFine.baseline_block_size`` under ``checkpoint``
     (see :func:`tabascal.interferometry.calculate_rfi_vis_blocked`) so that the
     fine grid it integrates is bounded by the block rather than by the whole
     array: what the forward pass leaves behind for reverse mode is the result
@@ -57,6 +137,8 @@ class RiemannVisFine(Component):
     across four it is well under it, the tape being per-device memory that the
     collective does not divide.
     """
+
+    Config = RiemannVisFineConfig
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -79,32 +161,11 @@ class RiemannVisFine(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_ant = config.n_ant
-            self.backend = _read_backend(config, ("ffi", "jax"))
-
+            self.backend = self.config.backend
             # null is a setting, not a missing value: one block over every
             # baseline, which keeps the checkpoint and leaves the scan a single
-            # step. int() alone would turn 1.9 into 1 without a word: one
-            # baseline per scan step, dressed up as a valid setting. The
-            # finiteness test guards int() against yaml's .inf and .nan, which
-            # raise there with a message about floats rather than about the key;
-            # it is asked of floats only, since an int is finite by construction
-            # and float() on a big enough one raises in its turn.
-            block_size = config.args["rfi"].get("baseline_block_size", 128)
-            if block_size is not None and (
-                isinstance(block_size, bool)
-                or not isinstance(block_size, (int, float))
-                or (isinstance(block_size, float) and not isfinite(block_size))
-                or block_size != int(block_size)
-                or block_size < 1
-            ):
-                raise ValueError(
-                    "rfi.baseline_block_size is the number of baselines handled "
-                    "per scan step: a whole number of at least 1, or null for a "
-                    f"single block over every baseline, got {block_size!r}."
-                )
-            self.baseline_block_size = (
-                None if block_size is None else int(block_size)
-            )
+            # step.
+            self.baseline_block_size = self.config.baseline_block_size
 
             self._set_outputs()
 
@@ -200,10 +261,12 @@ class RiemannVisVariableFine(Component):
     """:class:`RiemannVisFine` with each baseline group sampled at its own stride.
 
     The baselines are split into the groups of ``time_sample_idxs``, each read at
-    every ``time_stride``-th fine time sample. ``rfi.backend`` picks ``ffi`` (the
+    every ``time_stride``-th fine time sample. ``RiemannVisVariableFine.backend`` picks ``ffi`` (the
     default), one ``RFIVisOp`` per group, or ``jax``; ``ffi`` scales poorly
     across devices.
     """
+
+    Config = RiemannVisVariableFineConfig
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -227,7 +290,7 @@ class RiemannVisVariableFine(Component):
             self.n_time = config.n_time
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
-            self.backend = _read_backend(config, ("ffi", "jax"))
+            self.backend = self.config.backend
 
             self.time_sample_idxs = config.time_sample_idxs
             self.time_strides = config.time_strides
@@ -335,9 +398,9 @@ class RiemannVisVariableFine(Component):
 
         if sharding_enabled():
             print(
-                "\n!!! WARNING !!!  RiemannVisVariableFine with rfi.backend: ffi "
+                "\n!!! WARNING !!!  RiemannVisVariableFine with backend: ffi "
                 "scales poorly across multiple devices. Consider using "
-                "RiemannVisFine with rfi.backend: ffi instead for multi-device "
+                "RiemannVisFine with backend: ffi instead for multi-device "
                 "runs.\n"
             )
 
@@ -401,16 +464,6 @@ class RiemannVisVariableFine(Component):
         }
 
 
-#: The ``rfi.analytic`` options and their ranges; ``None`` is unbounded.
-_ANALYTIC_OPTIONS = {
-    "stencil": (0, 4),
-    "segments": (1, 1024),
-    "terms": (1, 32),
-    "cubic_terms": (0, 8),
-    "scratch_mb": (1, None),
-}
-
-
 class AnalyticVis(Component):
     """RFI visibilities from the data grid, each cell integrated in closed form.
 
@@ -419,7 +472,7 @@ class AnalyticVis(Component):
     ``ComplexRFIConstAnt``) and :class:`~tabascal.components.trajectory.FixedOrbit`
     on the data grid, with the delay polynomial beside them, and hands them to
     ``ri_kernels.jax_api.RFIAnalyticVisOp``. Inside each cell the signal is the
-    polynomial through the ``2 * rfi.analytic.stencil + 1`` nearest cells on each
+    polynomial through the ``2 * AnalyticVis.stencil + 1`` nearest cells on each
     axis and the phase is linear in frequency and a Taylor series in time; the
     time integral is closed form and the frequency one the ``n_int_freq``-point
     rule of the fine grid. No fine time grid is formed, so ``n_int_time`` is
@@ -431,6 +484,8 @@ class AnalyticVis(Component):
     is integrated alone, over the whole axis, and its visibility masked per
     cell. See ``docs/analytic_rfi_vis.md``.
     """
+
+    Config = AnalyticVisConfig
 
     # Accumulates into vis_rfi, which Model zeroes before the components run.
     required_inputs = {
@@ -451,10 +506,13 @@ class AnalyticVis(Component):
             self.n_bl = config.n_bl
             self.n_freq = config.n_freq
             self.n_time = config.n_time
-            # Only the compiled op for now: the JAX reference lands with it in
-            # ri_kernels and becomes the second backend then.
-            self.backend = _read_backend(config, ("ffi",))
-            self.options = self._read_options(config.args["rfi"]["analytic"])
+            self.backend = self.config.backend
+            self.options = {
+                "segments": self.config.segments,
+                "terms": self.config.terms,
+                "cubic_terms": self.config.cubic_terms,
+                "scratch_mb": self.config.scratch_mb,
+            }
 
             # The kernel writes each antenna pair once, so a repeated pair would
             # be left unwritten. A reversed pair or an autocorrelation is fine.
@@ -471,7 +529,7 @@ class AnalyticVis(Component):
 
             # Host-side float64 tables, once. MHz against delays in
             # microseconds: their product is cycles.
-            h = self.options.pop("stencil")
+            h = self.config.stencil
             chan_width = float(config.chan_width)
             dnu = fine_offsets(config.n_int_freq, chan_width)
             self.w_freq, self.start_freq = interp_tables(self.n_freq, h, dnu / chan_width)
@@ -489,30 +547,6 @@ class AnalyticVis(Component):
 
         except Exception as e:
             raise RuntimeError(f"{self.__class__.__name__} setup failed: {e}")
-
-    @staticmethod
-    def _read_options(analytic):
-        unknown = sorted(set(analytic) - set(_ANALYTIC_OPTIONS))
-        if unknown:
-            raise ValueError(
-                f"rfi.analytic.{unknown[0]} is not an option; the options are "
-                f"{', '.join(_ANALYTIC_OPTIONS)}."
-            )
-        options = {}
-        for key, (lo, hi) in _ANALYTIC_OPTIONS.items():
-            value = analytic[key]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < lo
-                or (hi is not None and value > hi)
-            ):
-                bounds = f"from {lo} to {hi}" if hi is not None else f"of at least {lo}"
-                raise ValueError(
-                    f"rfi.analytic.{key} must be a whole number {bounds}, got {value!r}."
-                )
-            options[key] = value
-        return options
 
     def build_set_params(self):
 

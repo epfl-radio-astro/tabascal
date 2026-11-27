@@ -595,7 +595,7 @@ def write_results_ms(
             "set, or an antenna was dropped between the run and the write."
         )
 
-    # A run narrowed with data.freq is a valid run whose results simply do not
+    # A run narrowed with data.freq_hz is a valid run whose results simply do not
     # span the MS. Which channels it holds is not the missing piece -- the zarr's
     # freq coordinate records them, since write_results_xds stores the run's own
     # tab_config.freqs. What is missing is here: nothing below maps a partial
@@ -604,7 +604,7 @@ def write_results_ms(
     if int(xds_ms.sizes["chan"]) != n_freq:
         raise ValueError(
             f"The results hold {n_freq} channels but the MS has "
-            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq covers "
+            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq_hz covers "
             "part of the band, and this writer does not yet use the results' "
             "freq coordinate to place a partial band on the MS's channels, so "
             "exporting one to a full-band measurement set is not yet supported."
@@ -1088,33 +1088,26 @@ def write_gain_caltable(
 # Per-satellite RFI decomposition
 # ---------------------------------------------------------------------------
 
-def _rfi_vis_reference(tab_config) -> str:
-    """The one ``rfi_vis`` component in the run's model list, as its reference.
-
-    The decomposition is only the run's own RFI visibility op run one satellite
-    at a time, so it has to be *that* op: a different one would answer a
-    question about a model the run did not fit. Which one it was is not recorded
-    anywhere but ``model.components``, and if that names none, or more than one,
-    there is no answer to give rather than a guess to make.
-    """
-
-    components = (tab_config.args.get("model") or {}).get("components") or []
-    refs = [
-        ref
-        for ref in components
-        if ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1] == "rfi_vis"
+def _rfi_vis_spec(tab_config):
+    """The one ``rfi_vis`` component spec in the run's model list."""
+    components = tab_config.config.model.components
+    specs = [
+        spec
+        for spec in components
+        if spec.ref.replace(":", ".").rsplit(".", 1)[0].rsplit(".", 1)[-1] == "rfi_vis"
     ]
 
-    if len(refs) != 1:
+    if len(specs) != 1:
+        refs = [spec.ref for spec in specs]
         raise ValueError(
             f"data.save_rfi_per_sat needs exactly one rfi_vis component to "
-            f"evaluate per satellite, but model.components names {len(refs)}: "
+            f"evaluate per satellite, but model.components names {len(specs)}: "
             f"{refs}. The per-satellite decomposition is the run's own RFI "
             "visibility op evaluated one source at a time, so there has to be "
             "exactly one op to evaluate."
         )
 
-    return refs[0]
+    return specs[0]
 
 
 def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
@@ -1132,7 +1125,7 @@ def wants_rfi_per_sat(vi_pred: dict, tab_config) -> bool:
     """
 
     return bool(
-        tab_config.args["data"].get("save_rfi_per_sat", False)
+        tab_config.config.data.save_rfi_per_sat
         and "rfi_A" in vi_pred
         and int(getattr(tab_config, "n_rfi_real", getattr(tab_config, "n_rfi", 0)))
     )
@@ -1265,10 +1258,10 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     source's contribution is recovered by evaluating the **same** op with every
     other source's amplitude held at zero -- on the already-fitted ``rfi_A`` and
     ``rfi_phase`` carried in ``vi_pred``, on the fine grid or, for
-    ``rfi_vis:AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
+    ``rfi_vis.AnalyticVis``, on the data grid with ``rfi_delay_poly_us`` beside
     them. No re-fit, no GP
     re-evaluation, and no second model: the component is the run's own, rebuilt
-    from ``model.components`` (see :func:`_rfi_vis_reference`).
+    from ``model.components`` (see :func:`_rfi_vis_spec`).
 
     **The pieces sum back to ``vis_rfi`` exactly in exact arithmetic, and in
     floating point to a difference that is data-dependent and cannot be bounded
@@ -1323,7 +1316,7 @@ def rfi_vis_per_sat(vi_pred: dict, tab_config, sink=None):
     ``norad_ids`` the satellite behind each ``src`` index.
     """
 
-    comp = import_components([_rfi_vis_reference(tab_config)])[0]()
+    comp = _rfi_vis_spec(tab_config).instantiate()
     comp.setup(tab_config)
     constants = {f"{comp.prefix}/{k}": v for k, v in comp.build_constants().items()}
     forward = comp.build_forward()
@@ -1600,7 +1593,7 @@ def write_per_sat_rfi_ms(
     if int(xds_ms.sizes["chan"]) != n_freq:
         raise ValueError(
             f"The results hold {n_freq} channels but the MS has "
-            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq covers "
+            f"{int(xds_ms.sizes['chan'])}. A run narrowed with data.freq_hz covers "
             "part of the band, and there is nothing here that says which part, "
             "so the columns cannot be placed."
         )
@@ -1822,7 +1815,7 @@ def write_results_xds(
                 },
                 # Which correlation was fitted, by name. Without it the writer
                 # cannot tell where the results belong on a multi-correlation MS.
-                attrs={"corr": tab_config.args["data"]["corr"]},
+                attrs={"corr": tab_config.config.data.corr},
             )
 
             # Appended to the store the decomposition was streamed into, rather

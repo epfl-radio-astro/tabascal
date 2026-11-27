@@ -36,6 +36,7 @@ dependencies = [
     "numpyro",
     "optax",
     "platformdirs",
+    "pydantic>=2.0,<3",
     # Analytic Earth velocity (epv00) for the annual aberration of the tracked
     # phase centre, with no ephemeris to download; see tabascal/time.py.
     "pyerfa",
@@ -136,6 +137,7 @@ optax           = "*"
 python          = ">=3.10,<3.14"
 python-casacore = "*"
 platformdirs    = "*"
+pydantic        = ">=2.0,<3"
 pyyaml          = "*"
 # Bounded: sgp4jax enables jax_enable_x64 at import (set_precision relies on this
 # ordering) and its orbit API is pre-1.0, so pin a known-good range.

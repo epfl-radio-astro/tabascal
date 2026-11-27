@@ -62,7 +62,7 @@ Three entry points are provided:
   :class:`~tabascal.config.TabConfig` has already loaded (visibilities, noise,
   antennas, times, orbit records) so tabascal can seed the RFI model without
   touching the MS again, and returns the curves already ordered to match
-  ``satellites.norad_ids``.
+  the trajectory component's ``norad_ids``.
 * :func:`extract_light_curves_from_ms` -- the standalone tool. Point it at any MS
   column and a set of NORAD IDs and it returns / saves the light curves.
 * :func:`extract_light_curves_from_zarr` -- the post-fit diagnostic. Matched
@@ -106,7 +106,8 @@ the horizon, :func:`search_candidates` runs that same scan over all of them --
 candidate's horizon mask and coherence cut applied *inside* the statistic so the
 shapes stay static -- and :func:`select_detections` reads the ranking against the
 decohered null. ``tabascal search`` is the command, and what it emits is the
-``satellites.norad_ids`` list a run needs (:func:`write_config_fragment`), the
+trajectory component fragment with the ``norad_ids`` list a run needs
+(:func:`write_config_fragment`), the
 ranking table (:func:`write_search_results`), and the light curves and shifted
 orbit records of whatever it named. That is GitHub #191, which produced
 STARLINK-1765 out of 2551 records on the MWA Cen A dataset.
@@ -1820,7 +1821,7 @@ def fit_time_offset(
         allowed to say.
     min_elevation : float, optional, default 0.0
         Elevation in degrees below which the satellite is not searched for,
-        inclusive, as ``rfi.min_elevation`` is. ``None`` uses every frame. The
+        inclusive, as ``trajectory.min_elevation_deg`` is. ``None`` uses every frame. The
         in-view window is *sliced* out before the scan, so nothing below the
         horizon costs anything; the core's ``frame_mask`` is the equivalent for
         callers whose shapes must stay static.
@@ -2168,7 +2169,7 @@ def enumerate_candidates(
         Antenna positions in the ITRF frame, in metres; the mean is the site.
     min_elevation : float, optional, default 0.0
         Elevation in degrees at or above which a satellite counts as up,
-        inclusive, as ``rfi.min_elevation`` is. A satellite reaching it in at
+        inclusive, as ``trajectory.min_elevation_deg`` is. A satellite reaching it in at
         least one integration is kept. ``None`` keeps every record over every
         frame.
 
@@ -3013,11 +3014,12 @@ def write_search_results(
 def write_config_fragment(
     path: str, selection: dict, shifted_orbit_dir=None
 ) -> str:
-    """Write the detections as a tabascal ``satellites`` section.
+    """Write the detections as a ``trajectory.FixedOrbit`` component snippet.
 
     The deliverable the issue asks for: the ``norad_ids`` list a run needs,
-    produced from the data rather than known in advance, ready to merge into a
-    config. Written even when nothing was detected -- an empty list with a line
+    produced from the data rather than known in advance, ready to paste under
+    ``model.components`` (or merge into another ``trajectory.*`` component).
+    Written even when nothing was detected -- an empty list with a line
     saying why is an artifact to point at, where a missing file leaves the reader
     to guess the run failed.
 
@@ -3027,7 +3029,7 @@ def write_config_fragment(
     user which channels to fit. Any warnings from :func:`select_detections` are
     written under them.
 
-    With ``shifted_orbit_dir`` the section also points at the epoch-shifted
+    With ``shifted_orbit_dir`` the snippet also points at the epoch-shifted
     records (:func:`write_shifted_orbits`) with no age ceiling, which is the
     whole point of writing them: a later run reproduces the trajectories the
     search measured, whatever SatChecker serves by then.
@@ -3042,8 +3044,9 @@ def write_config_fragment(
     detected = selection["detected"]
     lines = [
         "# tabascal satellite search: the satellites found in these visibilities.",
-        "# Merge this section into a config, or point --extra-orbit-dir at the",
-        "# shifted records it names.",
+        "# Paste this entry under model.components (or merge its keys into another",
+        "# trajectory.* component), or point --extra-orbit-dir at the shifted",
+        "# records it names.",
     ]
     if detected:
         lines.append("#")
@@ -3063,18 +3066,18 @@ def write_config_fragment(
     for warning in selection["warnings"]:
         lines.append(f"# WARNING: {warning}")
 
-    satellites = {"norad_ids": [int(row["norad_id"]) for row in detected]}
+    trajectory = {"norad_ids": [int(row["norad_id"]) for row in detected]}
     if shifted_orbit_dir is not None:
-        satellites["extra_orbit_dir"] = str(shifted_orbit_dir)
-        satellites["extra_orbit_max_age_days"] = None
+        trajectory["extra_orbit_dir"] = str(shifted_orbit_dir)
+        trajectory["extra_orbit_max_age_days"] = None
 
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
         # default_flow_style=None keeps the ID list on one line, as tabascal's
-        # own configs write it, while the section itself stays in block style.
+        # own configs write it, while the component entry stays in block style.
         fh.write(
             yaml.safe_dump(
-                {"satellites": satellites},
+                [{"trajectory.FixedOrbit": trajectory}],
                 sort_keys=False,
                 default_flow_style=None,
             )
@@ -3141,7 +3144,7 @@ def _resolve_noise(noise, what: str):
         "in sensitivity, so averaging them equally over-weights the loud "
         "baselines; and with no sigma there is no noise floor to quote, so the "
         "error and the z statistic are nan and no coverage can be computed. Set "
-        "data.noise to get either back."
+        "data.noise_jy to get either back."
     )
 
     return None
@@ -3160,7 +3163,7 @@ def has_noise_scale(result: dict) -> bool:
 def _elevation_mask(orbit_records, times_jd, ants_itrf, min_elevation):
     """In-view mask for each record, or ``None`` when no cut is configured.
 
-    Inclusive, as ``rfi.min_elevation`` is: the cut is the lowest elevation still
+    Inclusive, as ``trajectory.min_elevation_deg`` is: the cut is the lowest elevation still
     modelled, so a sample sitting exactly on it is in view.
     """
     if min_elevation is None or len(orbit_records) == 0:
@@ -3181,7 +3184,7 @@ def _resolve_records(norad_ids, times_jd, extra_orbit_dir):
     if norad_ids is None or len(norad_ids) == 0:
         raise ValueError(
             "No satellites to filter for: give norad_ids, or a tabascal config "
-            "whose satellites.norad_ids names them."
+            "whose trajectory component names them."
         )
 
     _, _, ids, records, n_real = fetch_orbital_elements(
@@ -3206,14 +3209,15 @@ def light_curves_from_config(
 
     The in-process path: reuses the visibilities, noise, antenna positions, times
     and orbit records the config has loaded, so no second MS read is needed, and
-    the curves come back ordered to match ``satellites.norad_ids`` -- no title
+    the curves come back ordered to match the trajectory component's
+    ``norad_ids`` -- no title
     matching, and no light-curve file.
 
     Curves are returned for the *real* satellites only. Under device sharding the
     source axis is padded with duplicates of the last satellite, and those rows
     are re-added as zeros by the seeding code that consumes this.
 
-    The elevation cut is the run's own ``rfi.min_elevation`` mask, taken off the
+    The elevation cut is the run's own ``trajectory.min_elevation_deg`` mask, taken off the
     config rather than recomputed, so the estimate is masked exactly where the
     model is.
 
@@ -3303,8 +3307,8 @@ def light_curves_from_config(
         norad_ids,
         np.asarray(tab_config.freqs),
         to_utc_mjd(tab_config.times_mjd, tab_config.time_scale),
-        tab_config.args["data"]["data_col"],
-        tab_config.args["data"]["corr"],
+        tab_config.config.data.data_col,
+        tab_config.config.data.corr,
         in_view=in_view,
     )
 
@@ -3819,12 +3823,12 @@ def select_sources(result: dict, keep) -> dict:
 # ---------------------------------------------------------------------------
 
 def save_light_curves_npz(path: str, result: dict) -> None:
-    """Save a light-curve result as the ``rfi.est`` interchange format.
+    """Save a light-curve result as the ``rfi_signal.est`` interchange format.
 
     The four names :func:`tabascal.components.rfi_signal.read_light_curves`
     requires -- ``light_curves`` ``(n_src, n_time, n_freq)``, ``norad_ids``,
     ``times`` (**UTC** MJD) and ``freqs`` (Hz) -- so the output of a
-    ``tabascal light-curve`` run can be pointed at with ``rfi.est`` unchanged.
+    ``tabascal light-curve`` run can be pointed at with ``rfi_signal.est`` unchanged.
 
     ``times`` is UTC and not the MS's ``TIME`` column as declared. The format
     states one scale so a curve stays interpretable away from the MS it was
