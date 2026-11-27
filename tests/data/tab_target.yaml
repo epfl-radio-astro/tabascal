@@ -45,4 +45,3 @@ plots:
 opt:
   epsilon: 1e-3
   max_iter: 100
-  dual_run: false

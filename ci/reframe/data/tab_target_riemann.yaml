@@ -43,5 +43,4 @@ plots:
 opt:
   epsilon: 1.0e-3
   max_iter: 500
-  dual_run: false
   trace_path: null

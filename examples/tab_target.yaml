@@ -41,4 +41,7 @@ plots:
 opt:
   epsilon: 1e-3
   max_iter: 2000
-  dual_run: true
+  schedule:
+    kind: step
+    boundaries: [1000]
+    factor: 0.1

@@ -285,7 +285,7 @@ def jittered_fits(tmp_path_factory):
                     "precision": precision,
                 },
                 "seed": seed,
-                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False,
+                "opt": {"epsilon": 1e-3, "max_iter": 3,
                         "init_jitter": 0.1},
             },
             template,

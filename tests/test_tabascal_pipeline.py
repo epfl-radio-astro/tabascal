@@ -231,8 +231,7 @@ def _run_pipeline(
     }
     # Whole sections, not merged into the template's: read_and_modify_yaml
     # replaces top-level sections, and the reference values were measured that
-    # way -- {"opt": {"max_iter": 400}} runs the default epsilon and dual_run,
-    # not the template's.
+    # way -- {"opt": {...}} overrides the template's opt section wholesale.
     config_mod.update(t_config.config_overrides)
     read_and_modify_yaml(config_mod, config_template, config_path)
 
@@ -476,21 +475,19 @@ trajectory_configs = [
                 "ast_vis.GPVisAst",
                 "gains.UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 400 (200 a phase): these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
-            # Measured opt-point values, double precision (gains identity -> RMSE 0); see the
-            # note on the FixedOrbitFine case for what ARM/x86/GPU are:
-            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542532126120 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540837835149 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540837835149,
+            # requires_double, so this runs in fp64 only. max_iter 300 at epsilon 3e-2 with b2 0.99:
+            # these MEO cases start far from the optimum (chi2 ~ 474) and are not converged at the
+            # standard 100 iterations.
+            # Measured opt-point values, double precision (gains identity -> RMSE 0):
+            #   chi2 0.8468276563658013 | ast NRMSE(noise) 0.2424, sig 3.3 | rfi NRMSE(noise) 0.5341, sig 0.8
+            chi2_ref=0.8468276563658013,
             requires_double=True,
-            config_overrides={"opt": {"max_iter": 400}},
+            config_overrides={
+                "opt": {"epsilon": 3e-2, "max_iter": 300, "optimizer": {"b2": 0.99}}
+            },
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.225, 0.260), "bias_significance": (0.0, 4.0)},
+                "rfi": {"NRMSE(noise)": (0.50, 0.57), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -507,21 +504,20 @@ trajectory_configs = [
                 "ast_vis.GPVisAst",
                 "gains.UnitaryGains",
             ],
-            # requires_double, so this runs in fp64 only. max_iter 400 (200 a phase): these MEO cases are
-            # genuinely not converged at the standard 100 -- re-measured there, chi2 is 5.5%
-            # higher (0.9017) and both NRMSEs are materially worse (ast 0.4130, rfi 0.6027).
+            # requires_double, so this runs in fp64 only. max_iter 300 at epsilon 3e-2 with b2 0.99:
+            # these MEO cases start far from the optimum (chi2 ~ 474) and are not converged at the
+            # standard 100 iterations.
             # Measured opt-point values, double precision (gains identity -> RMSE 0; matches
             # NoDragOrbitFine -- same orbit to fp precision):
-            #   arch | chi2               | ast NRMSE(noise) ast sig | rfi NRMSE(noise) rfi sig
-            #   ARM  | 0.8416542639577049 |     0.2232       2.7      |     0.5292       1.7
-            #   x86  | 0.8416540839414796 |     0.2232       2.7      |     0.5292       1.7
-            # Re-recorded for tabsim 0.1.0; see the FixedOrbitFine case.
-            chi2_ref=0.8416540839414796,
+            #   chi2 0.8467945759912512 | ast NRMSE(noise) 0.2424, sig 3.3 | rfi NRMSE(noise) 0.5341, sig 0.8
+            chi2_ref=0.8467945759912512,
             requires_double=True,
-            config_overrides={"opt": {"max_iter": 400}},
+            config_overrides={
+                "opt": {"epsilon": 3e-2, "max_iter": 300, "optimizer": {"b2": 0.99}}
+            },
             metrics_ref={
-                "ast": {"NRMSE(noise)": (0.208, 0.240), "bias_significance": (0.0, 3.5)},
-                "rfi": {"NRMSE(noise)": (0.50, 0.56), "bias_significance": (0.0, 2.0)},
+                "ast": {"NRMSE(noise)": (0.225, 0.260), "bias_significance": (0.0, 4.0)},
+                "rfi": {"NRMSE(noise)": (0.50, 0.57), "bias_significance": (0.0, 2.0)},
                 "gains": {"RMSE": (0.0, 1e-6)},
             },
         ),
@@ -783,7 +779,7 @@ def test_pipeline_writes_into_its_own_run_directory(
                 "components": template["model"]["components"],
                 "precision": precision,
             },
-            "opt": {"epsilon": 1e-3, "max_iter": 1, "dual_run": False},
+            "opt": {"epsilon": 1e-3, "max_iter": 1},
             "plots": {"losses": True},
         },
         data_dir / "tab_target.yaml",

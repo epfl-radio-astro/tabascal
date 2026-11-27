@@ -530,7 +530,6 @@ def run_custom_svi(
     max_iter: int = 1_000,
     init_params: dict = None,
     epsilon: float = 1e-3,
-    dual_run: bool = True,
     state: dict = None,
     constants: dict = None,
     trace_path: Optional[str] = None,
@@ -568,17 +567,14 @@ def run_custom_svi(
     rank 0's, gated inside :func:`_write_loss_trace`.
 
     ``optimizer`` (normalised by :func:`tabascal.opt_schedule.validate_optimizer`)
-    is the optax optimiser each phase builds, ``adabelief`` when it is None.
+    is the optax optimiser to run, ``adabelief`` when it is None.
     ``schedule`` (normalised by :func:`tabascal.opt_schedule.validate_schedule`)
-    replaces the two phases with one optimiser whose step size follows it,
-    for ``max_iter`` steps in all; ``dual_run`` is then not read. One optimiser
-    means one compiled step and moments that carry through every step (#82).
-    ``stop`` ends that run early once :func:`tabascal.opt_schedule.converged`.
-    ``checkpoints`` are steps, counted across both phases with ``dual_run``,
-    after which the parameters are written to ``checkpoint_path(step)``.
+    sets its step-size schedule over ``max_iter`` steps, or constant ``epsilon``
+    when None, with moments carrying through every step (#82).
+    ``stop`` ends the run early once :func:`tabascal.opt_schedule.converged`.
+    ``checkpoints`` are 1-based step counts after which the parameters are
+    written to ``checkpoint_path(step)``.
     """
-    if stop is not None and schedule is None:
-        raise ValueError("run_custom_svi takes a stop only with a schedule.")
     # Metrics without a path would compile and run the traced step for a
     # production run and then discard every number it cost.
     if trace_path is None:
@@ -586,8 +582,8 @@ def run_custom_svi(
 
     metrics_fn, metrics_data = metrics if metrics is not None else (None, None)
 
-    # Wall-clock elapsed at the end of each iteration, measured from the first
-    # step of the first phase. Comparing two models by loss-per-iteration hides
+    # Wall-clock elapsed at the end of each iteration, measured from the start
+    # of the first step. Comparing two models by loss-per-iteration hides
     # any difference in cost per iteration, so a model that converges in fewer
     # but more expensive steps looks better than it is; the honest axis is time.
     # `float(loss)` below already forces a device sync, so the timestamp taken
@@ -599,83 +595,56 @@ def run_custom_svi(
 
     checkpoints = set(checkpoints)
 
-    def _run_phase(params, optimizer, max_iter, offset=0, learning_rate=None):
-        nonlocal trace_t0
-        opt_state = optimizer.init(params)
-        if learning_rate is not None:
-            hyperparams = opt_state.hyperparams
-            opt_state = opt_state._replace(hyperparams={
-                **hyperparams,
-                "learning_rate": jnp.asarray(learning_rate, hyperparams["learning_rate"].dtype),
-            })
-        # Placed as _map_step returns it, so the second step reuses the first one's
-        # executable instead of compiling again for a differently placed state.
-        opt_state = replicate_off_mesh(opt_state)
-        losses = []
-        window = max(max_iter // 10, 1)
-        init_loss = None
-        pbar = trange(max_iter, disable=not is_process_0())
-        for i in pbar:
-            if trace_t0 is None:
-                trace_t0 = perf_counter()
-            if metrics_fn is None:
-                params, opt_state, loss = _map_step(
-                    prob_model, optimizer, params, opt_state, state, constants, obs_data
-                )
-            else:
-                params, opt_state, loss, step_metrics = _map_step_metrics(
-                    prob_model, optimizer, metrics_fn, params, opt_state,
-                    state, constants, obs_data, metrics_data,
-                )
-                for name, value in step_metrics.items():
-                    traced_metrics.setdefault(name, []).append(float(value))
-            loss_val = float(loss)
-            step_times.append(perf_counter() - trace_t0)
-            losses.append(loss_val)
-            if init_loss is None:
-                init_loss = loss_val
-            start_idx = max(0, i + 1 - window)
-            avg_loss = sum(losses[start_idx:]) / len(losses[start_idx:])
-            n1 = start_idx + 1
-            n2 = i + 1
-            pbar.set_postfix_str(
-                f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
-                refresh=False,
-            )
-            if offset + i + 1 in checkpoints:
-                save_checkpoint(
-                    checkpoint_path(offset + i + 1), params, offset + i + 1, loss_val,
-                    write=is_process_0(),
-                )
-            # Every rank holds the same losses, so every rank stops at the same step.
-            if stop is not None and converged(losses, stop):
-                pbar.close()
-                print(f"Converged after {i + 1} steps: the mean loss moved by less "
-                      f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
-                break
-        return params, losses
+    lr = step_size(schedule, epsilon, max_iter) if schedule is not None else float(epsilon)
+    transform = build_optimizer(optimizer, lr)
 
     params = init_params
-    if schedule is not None:
-        transform = build_optimizer(optimizer, step_size(schedule, epsilon, max_iter))
-        params, losses = _run_phase(params, transform, max_iter)
-    else:
-        # The step size is a leaf of the optimiser state rather than a constant of
-        # the transform, so dual_run's second phase -- a fresh optimiser at a tenth
-        # of it -- runs the executable the first phase compiled.
-        transform = optax.inject_hyperparams(partial(build_optimizer, optimizer))(
-            learning_rate=float(epsilon)
-        )
-        # max_iter is the whole fit: dual_run splits it, the first phase taking
-        # the odd step when there is one.
-        first = (max_iter + 1) // 2 if dual_run else max_iter
-        params, losses = _run_phase(params, transform, first)
-
-        if dual_run:
-            params, losses2 = _run_phase(
-                params, transform, max_iter - first, offset=first, learning_rate=epsilon / 10
+    opt_state = transform.init(params)
+    # Placed as _map_step returns it, so the second step reuses the first one's
+    # executable instead of compiling again for a differently placed state.
+    opt_state = replicate_off_mesh(opt_state)
+    losses = []
+    window = max(max_iter // 10, 1)
+    init_loss = None
+    pbar = trange(max_iter, disable=not is_process_0())
+    for i in pbar:
+        if trace_t0 is None:
+            trace_t0 = perf_counter()
+        if metrics_fn is None:
+            params, opt_state, loss = _map_step(
+                prob_model, transform, params, opt_state, state, constants, obs_data
             )
-            losses = losses + losses2
+        else:
+            params, opt_state, loss, step_metrics = _map_step_metrics(
+                prob_model, transform, metrics_fn, params, opt_state,
+                state, constants, obs_data, metrics_data,
+            )
+            for name, value in step_metrics.items():
+                traced_metrics.setdefault(name, []).append(float(value))
+        loss_val = float(loss)
+        step_times.append(perf_counter() - trace_t0)
+        losses.append(loss_val)
+        if init_loss is None:
+            init_loss = loss_val
+        start_idx = max(0, i + 1 - window)
+        avg_loss = sum(losses[start_idx:]) / len(losses[start_idx:])
+        n1 = start_idx + 1
+        n2 = i + 1
+        pbar.set_postfix_str(
+            f"init loss: {init_loss:.4f}, avg. loss [{n1}-{n2}]: {avg_loss:.4f}",
+            refresh=False,
+        )
+        if i + 1 in checkpoints:
+            save_checkpoint(
+                checkpoint_path(i + 1), params, i + 1, loss_val,
+                write=is_process_0(),
+            )
+        # Every rank holds the same losses, so every rank stops at the same step.
+        if stop is not None and converged(losses, stop):
+            pbar.close()
+            print(f"Converged after {i + 1} steps: the mean loss moved by less "
+                  f"than {stop['rtol']:g} between the last two windows of {stop['window']}.")
+            break
 
     _write_loss_trace(trace_path, losses, step_times, traced_metrics)
 
@@ -755,7 +724,6 @@ def run_opt(
         max_iter=opt_config.max_iter,
         init_params=init_params,
         epsilon=opt_config.epsilon,
-        dual_run=opt_config.dual_run,
         state=state,
         constants=constants,
         trace_path=trace_path,

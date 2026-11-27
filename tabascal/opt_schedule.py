@@ -1,17 +1,11 @@
 """One optimiser for the whole fit: its kind, a step-size schedule, a stop and checkpoints.
 
-``opt.dual_run`` fits in two phases. The second restarts the optimiser at a
-tenth of the step size, from fresh moments, which GitHub #82 reports as a
-bump in the loss at the switch. ``opt.schedule`` builds one optimiser whose
-step size follows a schedule instead, with moments that run through every
-step.
-
-``opt.optimizer`` picks the optax optimiser and its hyperparameters, with
-or without a schedule, and can clip the gradient's global norm. ``opt.stop``
-ends the fit once the loss has stopped moving, and ``opt.checkpoints`` writes
-the parameters at given steps, so one long run can be scored at several step
-counts. All four are off by default, and with all four off the optimiser is the
-two-phase ``adabelief`` it always was.
+``opt.optimizer`` picks the optax optimiser and its hyperparameters (``adabelief``
+by default) and can clip the gradient's global norm. ``opt.schedule`` varies its
+step size over the fit (constant ``epsilon`` when null), with moments that run
+through every step. ``opt.stop`` ends the fit once the loss has stopped moving,
+and ``opt.checkpoints`` writes the parameters at given steps, so one long run can
+be scored at several step counts. All four are off by default.
 """
 
 import inspect
@@ -280,21 +274,13 @@ def validate_checkpoints(checkpoints, n_steps: int) -> List[int]:
 def validate_opt(opt_config, *, precision: Optional[str] = None) -> Dict:
     """Check ``opt.optimizer``, ``opt.schedule``, ``opt.stop`` and ``opt.checkpoints`` before the run starts.
 
-    Returns them normalised, under the same keys. ``stop`` needs ``schedule``:
-    with ``dual_run`` it is not clear whether a stop should end the first
-    phase or the fit.
+    Returns them normalised, under the same keys.
     """
     opt_config = _as_opt_dict(opt_config)
     max_iter = opt_config["max_iter"]
     optimizer = validate_optimizer(opt_config.get("optimizer"), precision=precision)
     schedule = validate_schedule(opt_config.get("schedule"), max_iter, precision=precision)
     stop = validate_stop(opt_config.get("stop"), precision=precision)
-    if stop is not None and schedule is None:
-        raise ValueError(
-            "opt.stop needs opt.schedule: with the two-phase dual_run optimiser it is "
-            "not clear whether it should end the first phase or the fit. Set a "
-            "schedule, e.g. {kind: step, boundaries: [N], factor: 0.1} for dual_run's drop."
-        )
     checkpoints = validate_checkpoints(opt_config.get("checkpoints"), total_steps(opt_config))
     return {"optimizer": optimizer, "schedule": schedule, "stop": stop, "checkpoints": checkpoints}
 
@@ -304,7 +290,7 @@ def step_size(schedule: Dict, epsilon: float, max_iter: int):
 
     Evaluated at the optimiser's count, the number of steps already taken, so a
     ``step`` boundary at N keeps the first N steps at ``epsilon`` and drops from
-    step N + 1 on -- where ``dual_run`` drops for ``max_iter: N``.
+    step N + 1 on.
 
     A warmup of W steps rises linearly from ``warmup_factor * epsilon`` and
     reaches ``epsilon`` at step W + 1. The decays then run over the remaining
@@ -346,13 +332,7 @@ def describe_schedule(opt_config, *, precision: Optional[str] = None) -> str:
             settings.append(f"gradient norm clipped at {optimizer['clip_norm']:g}")
         if settings:
             name += f" ({', '.join(settings)})"
-    if schedule is None and opt_config.get("dual_run", True):
-        first = (max_iter + 1) // 2
-        line = (
-            f"{name}, step size {epsilon:g} for {first} steps, then a new "
-            f"{name.split(' ')[0]} at {epsilon / 10:g} for {max_iter - first} (dual_run)"
-        )
-    elif schedule is None:
+    if schedule is None:
         line = f"{name}, step size {epsilon:g} for {max_iter} steps"
     else:
         kind = schedule["kind"]

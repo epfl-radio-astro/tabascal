@@ -1130,13 +1130,8 @@ class OptConfig(StrictConfigModel):
     max_iter: NonNegativeInt = Field(
         default=1000,
         description=(
-            "Optimisation steps in all: under dual_run the first half at epsilon and "
-            "the second at epsilon / 10. 0 runs no fit, only the initial prediction."
+            "Optimisation steps in all. 0 runs no fit, only the initial prediction."
         ),
-    )
-    dual_run: StrictBool = Field(
-        default=True,
-        description="Run a second optimisation phase at epsilon / 10 (ignored when schedule is set).",
     )
     optimizer: Optional[OptimizerConfig] = Field(
         default=None,
@@ -1148,14 +1143,14 @@ class OptConfig(StrictConfigModel):
     schedule: Optional[ScheduleConfig] = Field(
         default=None,
         description=(
-            "Single-optimiser step-size schedule (step, exponential, cosine, linear, "
-            "constant) with optional warmup_steps and warmup_factor. null keeps dual_run."
+            "Step-size schedule (step, exponential, cosine, linear, constant) with "
+            "optional warmup_steps and warmup_factor. null holds epsilon constant."
         ),
     )
     stop: Optional[StopConfig] = Field(
         default=None,
         description=(
-            "Early-stopping plateau criterion {window, rtol, min_steps}; requires schedule."
+            "Early-stopping plateau criterion {window, rtol, min_steps}."
         ),
     )
     checkpoints: Optional[list[PositiveInt]] = Field(
@@ -1176,23 +1171,6 @@ class OptConfig(StrictConfigModel):
             "relative paths resolve inside the run directory. Overridden by TAB_LOSS_TRACE."
         ),
     )
-
-    @model_validator(mode="after")
-    def _dual_run_or_schedule(self) -> "OptConfig":
-        if self.schedule is not None and "dual_run" in self.model_fields_set:
-            raise ValueError(
-                "dual_run and schedule are two ways of running the fit, and with a "
-                "schedule dual_run is not read. Leave dual_run out; "
-                "{kind: step, boundaries: [N], factor: 0.1} is dual_run's drop."
-            )
-        return self
-
-    def to_yaml_dict(self) -> dict[str, Any]:
-        dumped = super().to_yaml_dict()
-        if self.schedule is not None:
-            # Not read with a schedule, and refused beside one when written.
-            dumped.pop("dual_run")
-        return dumped
 
     @field_validator("init_jitter", mode="before")
     @classmethod

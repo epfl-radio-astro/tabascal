@@ -386,7 +386,7 @@ def deterministic_fits(tmp_path_factory):
                     "precision": precision,
                 },
                 "seed": seed,
-                "opt": {"epsilon": 1e-3, "max_iter": 3, "dual_run": False},
+                "opt": {"epsilon": 1e-3, "max_iter": 3},
             },
             template,
             config_path,

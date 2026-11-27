@@ -50,7 +50,7 @@ def test_optimized_run_keeps_zarr(monkeypatch, skip):
         config=validate_config({
             "model": {"components": []},
             "data": {"data_col": "DATA", "skip_ms_write": skip},
-            "opt": {"max_iter": 1, "epsilon": 0.1, "dual_run": False},
+            "opt": {"max_iter": 1, "epsilon": 0.1},
         }),
         vis_obs=data, noise=1., flags=jnp.zeros(data.shape, dtype=bool), n_rfi=0,
     )
